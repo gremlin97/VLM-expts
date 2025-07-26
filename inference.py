@@ -22,17 +22,28 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class MarsClassifier:
-    """Mars terrain classifier using fine-tuned CLIP/SigLIP."""
+    """Flexible Mars classifier using fine-tuned CLIP/SigLIP."""
     
-    def __init__(self, model_path: str, model_key: str):
+    def __init__(self, model_path: str, model_key: str, class_names: List[str] = None):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_key = model_key
         
-        # Mars terrain classes
-        self.class_names = [
-            'ael', 'rou', 'cli', 'aec', 'tex', 'smo', 'fss', 'rid', 
-            'fse', 'sfe', 'fsf', 'fsg', 'sfx', 'cra', 'mix'
-        ]
+        # Load class names from results file or use provided ones
+        results_path = os.path.join(os.path.dirname(model_path), 'results.json')
+        if class_names is None and os.path.exists(results_path):
+            with open(results_path, 'r') as f:
+                results = json.load(f)
+                self.class_names = results.get('class_names', [])
+                logger.info(f"Loaded class names from results: {self.class_names}")
+        elif class_names is not None:
+            self.class_names = class_names
+        else:
+            # Default Mars terrain classes
+            self.class_names = [
+                'ael', 'rou', 'cli', 'aec', 'tex', 'smo', 'fss', 'rid', 
+                'fse', 'sfe', 'fsf', 'fsg', 'sfx', 'cra', 'mix'
+            ]
+            logger.warning("Using default Mars terrain class names")
         
         if model_key not in MODEL_CONFIGS:
             raise ValueError(f"Unknown model: {model_key}")
@@ -166,12 +177,14 @@ class MarsClassifier:
         return result
 
 def main():
-    parser = argparse.ArgumentParser(description='Mars terrain classification inference')
+    parser = argparse.ArgumentParser(description='Mars classification inference')
     parser.add_argument('--model_path', type=str, required=True,
                       help='Path to trained model weights (.pth file)')
     parser.add_argument('--model_key', type=str, required=True,
                       choices=list(MODEL_CONFIGS.keys()),
                       help='Model architecture key')
+    parser.add_argument('--class_names', type=str, nargs='*', default=None,
+                      help='List of class names (auto-loaded from results.json if available)')
     parser.add_argument('--image_path', type=str,
                       help='Path to single image for prediction')
     parser.add_argument('--image_dir', type=str,
@@ -186,7 +199,7 @@ def main():
     args = parser.parse_args()
     
     # Initialize classifier
-    classifier = MarsClassifier(args.model_path, args.model_key)
+    classifier = MarsClassifier(args.model_path, args.model_key, args.class_names)
     
     if args.image_path:
         # Single image prediction

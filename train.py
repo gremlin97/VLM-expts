@@ -67,22 +67,24 @@ MODEL_CONFIGS = {
 }
 
 class MarsDataset(torch.utils.data.Dataset):
-    """Mars terrain dataset."""
+    """Flexible Mars dataset for various configurations."""
     
-    def __init__(self, dataset, processor):
+    def __init__(self, dataset, processor, image_column='image', label_column='label'):
         self.dataset = dataset
         self.processor = processor
+        self.image_column = image_column
+        self.label_column = label_column
         
     def __len__(self):
         return len(self.dataset)
     
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        image = item['image']
-        label = item['label']
+        image = item[self.image_column]
+        label = item[self.label_column]
         
         # Ensure RGB format
-        if image.mode != 'RGB':
+        if hasattr(image, 'mode') and image.mode != 'RGB':
             image = image.convert('RGB')
         
         # Process image
@@ -195,11 +197,23 @@ def plot_training_curves(train_losses, val_accuracies, save_path):
     plt.close()
 
 def main():
-    parser = argparse.ArgumentParser(description='Fine-tune CLIP/SigLIP image encoders on Mars dataset')
+    parser = argparse.ArgumentParser(description='Fine-tune CLIP/SigLIP image encoders on Mars datasets')
     parser.add_argument('--model', type=str, 
                       choices=list(MODEL_CONFIGS.keys()),
                       default='clip-vit-base-patch32',
                       help='Model to fine-tune')
+    parser.add_argument('--dataset', type=str, default='Mirali33/mb-domars16k',
+                      help='HuggingFace dataset name')
+    parser.add_argument('--dataset_config', type=str, default=None,
+                      help='Dataset configuration name')
+    parser.add_argument('--image_column', type=str, default='image',
+                      help='Name of image column in dataset')
+    parser.add_argument('--label_column', type=str, default='label',
+                      help='Name of label column in dataset')
+    parser.add_argument('--num_classes', type=int, default=None,
+                      help='Number of classes (auto-detected if not specified)')
+    parser.add_argument('--class_names', type=str, nargs='*', default=None,
+                      help='List of class names (optional)')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--num_epochs', type=int, default=10, help='Number of epochs')
     parser.add_argument('--learning_rate', type=float, default=5e-5, help='Learning rate')
@@ -207,7 +221,7 @@ def main():
     parser.add_argument('--warmup_ratio', type=float, default=0.1, help='Warmup ratio')
     parser.add_argument('--freeze_encoder', action='store_true', 
                       help='Freeze vision encoder weights')
-    parser.add_argument('--output_dir', type=str, default='./clip_results', 
+    parser.add_argument('--output_dir', type=str, default='./results', 
                       help='Output directory')
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases')
     parser.add_argument('--eval_steps', type=int, default=100, help='Evaluation frequency')
@@ -222,35 +236,78 @@ def main():
     if args.use_wandb and accelerator.is_main_process:
         wandb.init(project='mars-clip-siglip', config=vars(args))
     
-    # Mars terrain classes
-    class_names = [
-        'ael', 'rou', 'cli', 'aec', 'tex', 'smo', 'fss', 'rid', 
-        'fse', 'sfe', 'fsf', 'fsg', 'sfx', 'cra', 'mix'
-    ]
-    
-    logger.info(f"Fine-tuning {args.model} on Mars terrain classification")
-    logger.info(f"Classes: {len(class_names)}")
-    logger.info(f"Freeze encoder: {args.freeze_encoder}")
-    
     # Load dataset
-    logger.info("Loading Mars dataset...")
-    dataset = load_dataset("Mirali33/mb-domars16k")
+    logger.info(f"Loading dataset: {args.dataset}")
+    if args.dataset_config:
+        dataset = load_dataset(args.dataset, args.dataset_config)
+    else:
+        dataset = load_dataset(args.dataset)
+    
+    # Auto-detect number of classes and class names
+    if args.num_classes is None:
+        # Get unique labels from training set
+        train_labels = set()
+        for item in dataset['train']:
+            train_labels.add(item[args.label_column])
+        args.num_classes = len(train_labels)
+        logger.info(f"Auto-detected {args.num_classes} classes")
+    
+    # Set class names
+    if args.class_names is None:
+        if args.num_classes == 2:
+            class_names = ['negative', 'positive']
+        elif args.dataset == 'Mirali33/mb-domars16k':
+            # Default Mars terrain classes
+            class_names = [
+                'ael', 'rou', 'cli', 'aec', 'tex', 'smo', 'fss', 'rid', 
+                'fse', 'sfe', 'fsf', 'fsg', 'sfx', 'cra', 'mix'
+            ]
+        else:
+            # Generic class names
+            class_names = [f'class_{i}' for i in range(args.num_classes)]
+    else:
+        class_names = args.class_names
+        if len(class_names) != args.num_classes:
+            raise ValueError(f"Number of class names ({len(class_names)}) doesn't match num_classes ({args.num_classes})")
+    
+    logger.info(f"Fine-tuning {args.model} on {args.dataset}")
+    logger.info(f"Classes: {args.num_classes} - {class_names}")
+    logger.info(f"Freeze encoder: {args.freeze_encoder}")
     
     # Initialize processor and model
     config = MODEL_CONFIGS[args.model]
     processor = config['processor_class'].from_pretrained(config['model_name'])
     model = VisionEncoderClassifier(
         model_key=args.model,
-        num_classes=len(class_names),
+        num_classes=args.num_classes,
         freeze_encoder=args.freeze_encoder
     )
     
-    # Create datasets
-    train_dataset = MarsDataset(dataset['train'], processor)
-    val_dataset = MarsDataset(dataset['val'], processor)
-    test_dataset = MarsDataset(dataset['test'], processor)
+    # Handle different dataset splits
+    val_dataset = None
+    test_dataset = None
     
-    logger.info(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
+    if 'val' in dataset or 'validation' in dataset:
+        val_split = 'val' if 'val' in dataset else 'validation'
+        train_dataset = MarsDataset(dataset['train'], processor, args.image_column, args.label_column)
+        val_dataset = MarsDataset(dataset[val_split], processor, args.image_column, args.label_column)
+    elif 'test' in dataset:
+        # Use test as validation if no val split
+        train_dataset = MarsDataset(dataset['train'], processor, args.image_column, args.label_column)
+        val_dataset = MarsDataset(dataset['test'], processor, args.image_column, args.label_column)
+    else:
+        # Split training data if no validation set
+        logger.info("No validation set found, splitting training data 80/20")
+        train_val_split = dataset['train'].train_test_split(test_size=0.2, seed=42)
+        train_dataset = MarsDataset(train_val_split['train'], processor, args.image_column, args.label_column)
+        val_dataset = MarsDataset(train_val_split['test'], processor, args.image_column, args.label_column)
+    
+    if 'test' in dataset and ('val' in dataset or 'validation' in dataset):
+        test_dataset = MarsDataset(dataset['test'], processor, args.image_column, args.label_column)
+    
+    val_len = len(val_dataset) if val_dataset else 0
+    test_len = len(test_dataset) if test_dataset else 0
+    logger.info(f"Train: {len(train_dataset)}, Val: {val_len}, Test: {test_len}")
     
     # Create dataloaders
     train_dataloader = DataLoader(
@@ -260,11 +317,12 @@ def main():
     val_dataloader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=4, pin_memory=True
-    )
+    ) if val_dataset else None
+    
     test_dataloader = DataLoader(
         test_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=4, pin_memory=True
-    )
+    ) if test_dataset else None
     
     # Setup training
     optimizer = AdamW(
@@ -283,9 +341,14 @@ def main():
     )
     
     # Prepare with accelerator
-    model, optimizer, train_dataloader, val_dataloader, scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, val_dataloader, scheduler
-    )
+    if val_dataloader:
+        model, optimizer, train_dataloader, val_dataloader, scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, val_dataloader, scheduler
+        )
+    else:
+        model, optimizer, train_dataloader, scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, scheduler
+        )
     
     logger.info(f"Training steps: {total_steps}, Warmup: {warmup_steps}")
     
@@ -329,7 +392,7 @@ def main():
                 })
             
             # Evaluate
-            if global_step % args.eval_steps == 0:
+            if global_step % args.eval_steps == 0 and val_dataloader:
                 val_metrics = evaluate_model(model, val_dataloader, device, class_names)
                 val_accuracies.append(val_metrics['accuracy'])
                 
@@ -361,31 +424,46 @@ def main():
         logger.info(f"Epoch {epoch + 1}/{args.num_epochs} - Loss: {avg_epoch_loss:.4f}")
     
     # Final evaluation
-    logger.info("Final evaluation on test set...")
+    test_metrics = None
+    if test_dataloader:
+        logger.info("Final evaluation on test set...")
+        
+        # Load best model
+        if accelerator.is_main_process:
+            best_model_path = os.path.join(args.output_dir, 'best_model.pth')
+            if os.path.exists(best_model_path):
+                model.load_state_dict(torch.load(best_model_path, map_location=device))
+        
+        test_metrics = evaluate_model(model, test_dataloader, device, class_names)
+    elif val_dataloader:
+        logger.info("No test set available, using validation set for final evaluation...")
+        test_metrics = evaluate_model(model, val_dataloader, device, class_names)
+    else:
+        logger.info("No test or validation set available, skipping final evaluation")
     
-    # Load best model
     if accelerator.is_main_process:
-        best_model_path = os.path.join(args.output_dir, 'best_model.pth')
-        if os.path.exists(best_model_path):
-            model.load_state_dict(torch.load(best_model_path, map_location=device))
-    
-    test_metrics = evaluate_model(model, test_dataloader, device, class_names)
-    
-    if accelerator.is_main_process:
-        logger.info(f"Test Results:")
-        logger.info(f"  Accuracy: {test_metrics['accuracy']:.4f}")
-        logger.info(f"  Macro F1: {test_metrics['macro_f1']:.4f}")
-        logger.info(f"  Weighted F1: {test_metrics['weighted_f1']:.4f}")
+        if test_metrics:
+            logger.info(f"Final Results:")
+            logger.info(f"  Accuracy: {test_metrics['accuracy']:.4f}")
+            logger.info(f"  Macro F1: {test_metrics['macro_f1']:.4f}")
+            logger.info(f"  Weighted F1: {test_metrics['weighted_f1']:.4f}")
         
         # Save results
         results = {
             'model': args.model,
-            'test_accuracy': test_metrics['accuracy'],
-            'test_macro_f1': test_metrics['macro_f1'],
-            'test_weighted_f1': test_metrics['weighted_f1'],
+            'dataset': args.dataset,
+            'num_classes': args.num_classes,
+            'class_names': class_names,
             'best_val_accuracy': best_val_accuracy,
             'args': vars(args)
         }
+        
+        if test_metrics:
+            results.update({
+                'test_accuracy': test_metrics['accuracy'],
+                'test_macro_f1': test_metrics['macro_f1'],
+                'test_weighted_f1': test_metrics['weighted_f1'],
+            })
         
         with open(os.path.join(args.output_dir, 'results.json'), 'w') as f:
             json.dump(results, f, indent=2)
@@ -403,7 +481,7 @@ def main():
             os.path.join(args.output_dir, 'final_model.pth')
         )
         
-        if args.use_wandb:
+        if args.use_wandb and test_metrics:
             wandb.log({
                 'test_accuracy': test_metrics['accuracy'],
                 'test_macro_f1': test_metrics['macro_f1'],
