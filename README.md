@@ -1,26 +1,23 @@
-# Mars Terrain Classification with CLIP & SigLIP
+# Mars Classification with CLIP & SigLIP
 
-Fine-tune CLIP and SigLIP image encoders on the [Mars terrain classification dataset](https://huggingface.co/datasets/Mirali33/mb-domars16k) for planetary science research.
+Fine-tune CLIP and SigLIP image encoders on Mars datasets for planetary science research. Supports both multi-class terrain classification and binary classification tasks.
 
-## Dataset
+## Supported Datasets
 
-The dataset contains 29,718 Mars terrain images across 15 different terrain classes:
+### Default: Mars Terrain Classification
+The [mb-domars16k dataset](https://huggingface.co/datasets/Mirali33/mb-domars16k) contains 29,718 Mars terrain images across 15 terrain classes:
 
-- **ael**: Aeolian features
-- **rou**: Rough terrain  
-- **cli**: Cliffs
-- **aec**: Aeolian crater
-- **tex**: Textured terrain
-- **smo**: Smooth terrain
-- **fss**: Frost/snow surfaces
-- **rid**: Ridges
-- **fse**: Frost/snow edges
-- **sfe**: Sand/frost edges
-- **fsf**: Frost/snow formations
-- **fsg**: Frost/snow gullies
-- **sfx**: Sand/frost mixed
-- **cra**: Craters
-- **mix**: Mixed terrain
+- **ael**: Aeolian features, **rou**: Rough terrain, **cli**: Cliffs
+- **aec**: Aeolian crater, **tex**: Textured terrain, **smo**: Smooth terrain  
+- **fss**: Frost/snow surfaces, **rid**: Ridges, **fse**: Frost/snow edges
+- **sfe**: Sand/frost edges, **fsf**: Frost/snow formations, **fsg**: Frost/snow gullies
+- **sfx**: Sand/frost mixed, **cra**: Craters, **mix**: Mixed terrain
+
+### Custom Datasets
+The framework supports any HuggingFace dataset with image classification format:
+- **Binary classification**: Rock vs non-rock, crater vs no-crater, etc.
+- **Multi-class**: Any number of terrain/feature classes
+- **Custom splits**: Handles train/val/test or train-only datasets
 
 ## Available Models
 
@@ -65,20 +62,39 @@ chmod +x run_training.sh
 ./run_training.sh --freeze-encoder --epochs 5 --lr 1e-3
 ```
 
-### 3. Run Inference
+### 3. Train on Custom Dataset
 
 ```bash
-# Single image prediction
+# Binary classification example
+python train.py \
+    --dataset your-username/mars-binary-dataset \
+    --num_classes 2 \
+    --class_names rock no-rock \
+    --model clip-vit-base-patch32
+
+# Custom multi-class with different column names
+python train.py \
+    --dataset your-username/custom-mars \
+    --image_column img \
+    --label_column class_id \
+    --num_classes 5
+```
+
+### 4. Run Inference
+
+```bash
+# Single image prediction (class names auto-loaded)
 python inference.py \
     --model_path ./results/best_model.pth \
     --model_key clip-vit-base-patch32 \
     --image_path mars_image.jpg \
     --visualize
 
-# Batch prediction
+# Batch prediction with custom class names
 python inference.py \
     --model_path ./results/best_model.pth \
     --model_key clip-vit-base-patch32 \
+    --class_names rock no-rock \
     --image_dir /path/to/images/ \
     --output_file predictions.json
 ```
@@ -100,12 +116,17 @@ python train.py \
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `--model` | Model architecture | `clip-vit-base-patch32` |
+| `--dataset` | HuggingFace dataset name | `Mirali33/mb-domars16k` |
+| `--num_classes` | Number of classes (auto-detected) | None |
+| `--class_names` | List of class names | Auto-generated |
+| `--image_column` | Image column name | `image` |
+| `--label_column` | Label column name | `label` |
 | `--batch_size` | Training batch size | 32 |
 | `--num_epochs` | Number of epochs | 10 |
 | `--learning_rate` | Learning rate | 5e-5 |
 | `--freeze_encoder` | Freeze vision encoder weights | False |
 | `--use_wandb` | Enable W&B logging | False |
-| `--output_dir` | Output directory | `./clip_results` |
+| `--output_dir` | Output directory | `./results` |
 
 ### Training Strategies
 
