@@ -64,7 +64,7 @@ VLM_CONFIGS = {
     }
 }
 
-def vlm_collate_fn(batch):
+def vlm_collate_fn(batch, processor=None):
     """Custom collate function to handle variable-length sequences."""
     # Separate different types of data
     input_ids = [item['input_ids'] for item in batch]
@@ -92,8 +92,11 @@ def vlm_collate_fn(batch):
     padded_input_ids = []
     padded_attention_masks = []
     
-    # Use 0 as padding token (will be improved with processor-aware version later)
-    pad_token_id = 0
+    # Get padding token from processor or use default
+    if processor and hasattr(processor, 'tokenizer') and hasattr(processor.tokenizer, 'pad_token_id'):
+        pad_token_id = processor.tokenizer.pad_token_id
+    else:
+        pad_token_id = 0  # Fallback default
     
     for ids, mask in zip(input_ids, attention_masks):
         # Ensure we have the right data types
@@ -215,15 +218,29 @@ class VLMDataset(torch.utils.data.Dataset):
         assistant_start = None
         
         # Look for common assistant response patterns
+        # Try to find assistant start token based on the model's tokenization
+        assistant_tokens = [1, 2, 3]  # Common assistant start tokens for different models
+        
         for i in range(len(input_ids) - 1):
-            # This is a heuristic - adjust based on your specific model's tokenization
-            if input_ids[i] == 1:  # Common assistant start token
+            if input_ids[i] in assistant_tokens:
                 assistant_start = i + 1
                 break
         
+        # If no specific token found, try to find by content pattern
         if assistant_start is None:
-            # Fallback: assume the last 40% is the assistant response
-            assistant_start = int(len(input_ids) * 0.6)
+            # Look for "Assistant:" or similar patterns
+            decoded_text = self.processor.decode(input_ids[:min(50, len(input_ids))], skip_special_tokens=False)
+            if "assistant" in decoded_text.lower():
+                # Find the position after "assistant"
+                assistant_pos = decoded_text.lower().find("assistant")
+                if assistant_pos != -1:
+                    # Estimate token position (rough approximation)
+                    assistant_start = min(len(input_ids) - 1, max(1, assistant_pos // 4))
+        
+        # Fallback: use a more conservative estimate
+        if assistant_start is None:
+            # Assume the last 30% is the assistant response (more conservative)
+            assistant_start = int(len(input_ids) * 0.7)
         
         # Set labels to -100 for user input (before assistant response)
         labels[:assistant_start] = -100
@@ -306,8 +323,8 @@ def evaluate_vlm_model(model, dataloader, device, class_names, processor):
                 if predicted_class and predicted_class in class_names:
                     batch_predictions.append(class_names.index(predicted_class))
                 else:
-                    # Random guess if can't extract
-                    batch_predictions.append(0)
+                    # Use most common class as fallback if can't extract
+                    batch_predictions.append(0)  # Default to first class
             
             all_predictions.extend(batch_predictions)
             all_labels.extend(labels.cpu().numpy())
@@ -376,7 +393,8 @@ Strictly use this format:
 Reasoning: [Provide step-by-step reasoning about what you see in the image]
 Answer: [Provide only the class name for the dominant category]"""
 
-def auto_detect_dataset_info(dataset, image_column: str = 'image', label_column: str = 'label'):
+def auto_detect_dataset_info(dataset, image_column: str = 'image', label_column: str = 'label', 
+                           dataset_name: str = None, class_names: List[str] = None):
     """Auto-detect dataset information including class names and descriptions."""
     logger.info("Auto-detecting dataset information...")
     
@@ -411,13 +429,46 @@ def auto_detect_dataset_info(dataset, image_column: str = 'image', label_column:
     unique_labels = sorted(list(set(all_labels)))
     num_classes = len(unique_labels)
     
-    # Generate class names
-    if all(isinstance(label, int) for label in unique_labels):
-        # Integer labels - generate generic names
-        class_names = [f"class_{i}" for i in range(num_classes)]
+    # Use provided class names if available, otherwise generate intelligently
+    if class_names is not None:
+        if len(class_names) != num_classes:
+            logger.warning(f"Provided {len(class_names)} class names but dataset has {num_classes} classes")
+            logger.warning("Using provided names and padding with generic names if needed")
+            # Pad or truncate to match num_classes
+            if len(class_names) < num_classes:
+                class_names.extend([f"class_{i}" for i in range(len(class_names), num_classes)])
+            else:
+                class_names = class_names[:num_classes]
+        logger.info("Using provided class names")
+    elif all(isinstance(label, int) for label in unique_labels):
+        # For integer labels, try to infer meaningful names from dataset metadata
+        detected_names = []
+        
+        # Check if dataset has metadata with class information
+        if hasattr(dataset, 'features') and 'label' in dataset.features:
+            label_feature = dataset.features['label']
+            if hasattr(label_feature, 'names') and label_feature.names:
+                detected_names = label_feature.names
+                logger.info("Found class names in dataset metadata")
+            elif hasattr(label_feature, 'int2str') and callable(label_feature.int2str):
+                # Try to get class names from int2str mapping
+                try:
+                    detected_names = [label_feature.int2str(i) for i in range(num_classes)]
+                    logger.info("Generated class names from dataset int2str mapping")
+                except Exception:
+                    pass
+        
+        # Fallback to generic names if no meaningful names found
+        if not detected_names:
+            detected_names = [f"class_{i}" for i in range(num_classes)]
+            logger.info("Using generic class names for integer labels")
+            logger.info("Tip: Use --class_names to specify actual class names")
+        
+        class_names = detected_names
     else:
         # String labels - use as-is
         class_names = [str(label) for label in unique_labels]
+        logger.info("Using string labels as class names")
     
     logger.info(f"Auto-detected dataset info:")
     logger.info(f"  Image column: {detected_image_col}")
@@ -474,6 +525,8 @@ def main():
                       help='Custom system instructions')
     parser.add_argument('--prompt_template', type=str, default=None,
                       help='Custom prompt template')
+    parser.add_argument('--val_split_ratio', type=float, default=0.2,
+                      help='Validation split ratio when no validation set exists')
     
     args = parser.parse_args()
     
@@ -556,7 +609,7 @@ def main():
     if args.use_wandb and accelerator.is_main_process:
         wandb.init(project='vlm-classification', config=vars(args))
     
-    # Load dataset with timeout and better error handling
+    # Load dataset with simple error handling
     logger.info(f"Loading dataset: {args.dataset}")
     
     # Quick check if dataset exists (for common datasets)
@@ -568,41 +621,17 @@ def main():
         logger.info("Loading custom dataset...")
     
     try:
-        import signal
+        if args.dataset_config:
+            logger.info(f"Loading with config: {args.dataset_config}")
+            dataset = load_dataset(args.dataset, args.dataset_config)
+        else:
+            logger.info("Loading dataset without config...")
+            dataset = load_dataset(args.dataset)
         
-        def timeout_handler(signum, frame):
-            raise TimeoutError("Dataset loading timed out after 300 seconds")
-        
-        # Set timeout for dataset loading (5 minutes)
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(300)
-        
-        try:
-            if args.dataset_config:
-                logger.info(f"Loading with config: {args.dataset_config}")
-                dataset = load_dataset(args.dataset, args.dataset_config)
-            else:
-                logger.info("Loading dataset without config...")
-                dataset = load_dataset(args.dataset)
-            
-            # Cancel timeout
-            signal.alarm(0)
-            
-            logger.info(f"✓ Dataset loaded successfully!")
-            logger.info(f"Available splits: {list(dataset.keys())}")
-            for split, data in dataset.items():
-                logger.info(f"  {split}: {len(data)} samples")
-                
-        except TimeoutError:
-            logger.error("Dataset loading timed out! This could be due to:")
-            logger.error("1. Slow internet connection")
-            logger.error("2. Large dataset being downloaded")
-            logger.error("3. HuggingFace server issues")
-            logger.error("Try again or use a smaller dataset for testing")
-            return
-        except Exception as e:
-            signal.alarm(0)  # Cancel timeout
-            raise e
+        logger.info(f"✓ Dataset loaded successfully!")
+        logger.info(f"Available splits: {list(dataset.keys())}")
+        for split, data in dataset.items():
+            logger.info(f"  {split}: {len(data)} samples")
             
     except Exception as e:
         logger.error(f"Failed to load dataset: {e}")
@@ -614,20 +643,21 @@ def main():
         
         # Offer to use a test dataset instead
         logger.info("Would you like to try with a small test dataset?")
-        logger.info("You can run: python train_vlm.py --dataset hf-internal-testing/fixtures_image_utils --max_samples 10")
+        logger.info("You can run: python train_vlm.py --dataset cifar10 --max_samples 10")
         return
     
     # Auto-detect dataset information
     train_split = 'train' if 'train' in dataset else list(dataset.keys())[0]
     logger.info(f"Using '{train_split}' split for analysis")
     
-    image_column, label_column, class_names, num_classes = auto_detect_dataset_info(
-        dataset[train_split], args.image_column, args.label_column
+    image_column, label_column, detected_class_names, num_classes = auto_detect_dataset_info(
+        dataset[train_split], args.image_column, args.label_column, args.dataset, args.class_names
     )
     
     logger.info("Dataset analysis completed!")
     
-    # Override with user-provided values if specified
+    # Use detected class names or override with user-provided values
+    class_names = detected_class_names
     if args.class_names:
         class_names = args.class_names
         num_classes = len(class_names)
@@ -750,8 +780,8 @@ def main():
         )
     else:
         # Split training data if no validation set
-        logger.info("No validation set found, splitting training data 80/20")
-        train_val_split = dataset[train_split].train_test_split(test_size=0.2, seed=42)
+        logger.info(f"No validation set found, splitting training data {1-args.val_split_ratio:.0%}/{args.val_split_ratio:.0%}")
+        train_val_split = dataset[train_split].train_test_split(test_size=args.val_split_ratio, seed=42)
         train_dataset = VLMDataset(
             train_val_split['train'], processor, system_instructions, prompt_template,
             class_names, image_column=image_column, label_column=label_column,
@@ -774,18 +804,22 @@ def main():
     num_workers = 2 if args.device not in ['cpu'] else 0
     pin_memory = args.device not in ['cpu']
     
+    # Create collate function with processor
+    def collate_with_processor(batch):
+        return vlm_collate_fn(batch, processor)
+    
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, 
-        num_workers=num_workers, pin_memory=pin_memory, collate_fn=vlm_collate_fn
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=collate_with_processor
     )
     val_dataloader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=pin_memory, collate_fn=vlm_collate_fn
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=collate_with_processor
     ) if val_dataset else None
     
     test_dataloader = DataLoader(
         test_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=pin_memory, collate_fn=vlm_collate_fn
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=collate_with_processor
     ) if test_dataset else None
     
     # Setup training with better numerical stability
