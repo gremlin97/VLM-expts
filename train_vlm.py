@@ -716,7 +716,7 @@ def main():
                 model = AutoModelForImageTextToText.from_pretrained(
                     args.model,
                     torch_dtype=torch.bfloat16,  # Use bfloat16 for better stability
-                    device_map="auto"  # Let the model handle device placement
+                    device_map=None  # Don't use device_map to avoid accelerate issues
                 )
                 logger.info("✓ CUDA model loaded with bfloat16 (better numerical stability)")
             except Exception as e:
@@ -726,7 +726,7 @@ def main():
                 model = AutoModelForImageTextToText.from_pretrained(
                     args.model,
                     torch_dtype=torch.float32,  # Fallback to float32 for stability
-                    device_map="auto"
+                    device_map=None  # Don't use device_map to avoid accelerate issues
                 )
                 logger.info("✓ CUDA model loaded with float32 fallback")
         
@@ -801,25 +801,21 @@ def main():
         )
     
     # Create dataloaders with appropriate settings for device
-    num_workers = 2 if args.device not in ['cpu'] else 0
+    num_workers = 0  # Set to 0 to avoid multiprocessing issues
     pin_memory = args.device not in ['cpu']
-    
-    # Create collate function with processor
-    def collate_with_processor(batch):
-        return vlm_collate_fn(batch, processor)
     
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, 
-        num_workers=num_workers, pin_memory=pin_memory, collate_fn=collate_with_processor
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=lambda batch: vlm_collate_fn(batch, processor)
     )
     val_dataloader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=pin_memory, collate_fn=collate_with_processor
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=lambda batch: vlm_collate_fn(batch, processor)
     ) if val_dataset else None
     
     test_dataloader = DataLoader(
         test_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=pin_memory, collate_fn=collate_with_processor
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=lambda batch: vlm_collate_fn(batch, processor)
     ) if test_dataset else None
     
     # Setup training with better numerical stability
