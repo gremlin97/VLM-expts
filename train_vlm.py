@@ -87,6 +87,9 @@ def vlm_collate_fn(batch):
     padded_input_ids = []
     padded_attention_masks = []
     
+    # Use 0 as padding token (will be improved with processor-aware version later)
+    pad_token_id = 0
+    
     for ids, mask in zip(input_ids, attention_masks):
         # Ensure we have the right data types
         ids = ids.to(torch.long)
@@ -95,7 +98,7 @@ def vlm_collate_fn(batch):
         # Pad to max_length
         padding_length = max_length - len(ids)
         if padding_length > 0:
-            padded_ids = torch.cat([ids, torch.zeros(padding_length, dtype=torch.long)])
+            padded_ids = torch.cat([ids, torch.full((padding_length,), pad_token_id, dtype=torch.long)])
             padded_mask = torch.cat([mask, torch.zeros(padding_length, dtype=torch.long)])
         else:
             padded_ids = ids
@@ -444,7 +447,7 @@ def main():
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of epochs')
-    parser.add_argument('--learning_rate', type=float, default=1e-5, help='Learning rate')
+    parser.add_argument('--learning_rate', type=float, default=5e-6, help='Learning rate (lowered for stability)')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
     parser.add_argument('--warmup_ratio', type=float, default=0.1, help='Warmup ratio')
     
@@ -578,12 +581,23 @@ def main():
                 device_map=None
             )
         else:
-            # Use CUDA with appropriate dtype
-            model = AutoModelForImageTextToText.from_pretrained(
-                args.model,
-                torch_dtype=torch.float16,  # Use float16 for GPU efficiency
-                device_map="auto"  # Let the model handle device placement
-            )
+            # Use CUDA with appropriate dtype - prefer bfloat16 for better numerical stability
+            try:
+                # Try bfloat16 first (better numerical stability than float16)
+                model = AutoModelForImageTextToText.from_pretrained(
+                    args.model,
+                    torch_dtype=torch.bfloat16,  # Use bfloat16 for better stability
+                    device_map="auto"  # Let the model handle device placement
+                )
+                logger.info("Using bfloat16 for CUDA training (better numerical stability)")
+            except Exception as e:
+                logger.warning(f"bfloat16 not supported, falling back to float32: {e}")
+                # Fallback to float32 if bfloat16 is not supported
+                model = AutoModelForImageTextToText.from_pretrained(
+                    args.model,
+                    torch_dtype=torch.float32,  # Fallback to float32 for stability
+                    device_map="auto"
+                )
         
         # Log model configuration
         logger.info(f"Model config: {model.config}")
@@ -664,11 +678,13 @@ def main():
         num_workers=num_workers, pin_memory=pin_memory, collate_fn=vlm_collate_fn
     ) if test_dataset else None
     
-    # Setup training
+    # Setup training with better numerical stability
     optimizer = AdamW(
         model.parameters(),
         lr=args.learning_rate,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        eps=1e-8,  # Slightly larger epsilon for numerical stability
+        betas=(0.9, 0.999)  # Standard Adam betas
     )
     
     total_steps = len(train_dataloader) * args.num_epochs
@@ -747,28 +763,55 @@ def main():
                 logger.info(f"Labels contains -100: {(labels == -100).any()}")
                 logger.info(f"Labels valid tokens: {(labels != -100).sum()}")
             
-            # Check for NaN loss
+            # Check for problematic loss values
             if torch.isnan(loss):
-                logger.warning(f"NaN loss detected at step {global_step}")
-                logger.warning(f"Loss value: {loss}")
-                logger.warning(f"Input shape: {input_ids.shape}")
-                logger.warning(f"Labels shape: {labels.shape}")
-                logger.warning(f"Labels min/max: {labels.min()}/{labels.max()}")
-                logger.warning(f"Labels contains -100: {(labels == -100).any()}")
-                logger.warning(f"Labels valid tokens: {(labels != -100).sum()}")
+                logger.error(f"NaN loss detected at step {global_step}")
+                logger.error(f"Loss value: {loss}")
+                logger.error(f"Input shape: {input_ids.shape}")
+                logger.error(f"Labels shape: {labels.shape}")
+                logger.error(f"Labels min/max: {labels.min()}/{labels.max()}")
+                logger.error(f"Labels contains -100: {(labels == -100).any()}")
+                logger.error(f"Labels valid tokens: {(labels != -100).sum()}")
+                logger.error("This indicates numerical instability. Consider:")
+                logger.error("1. Using float32 instead of bfloat16")
+                logger.error("2. Reducing learning rate further")
+                logger.error("3. Using smaller batch size")
                 continue
             
             # Check for infinite loss
             if torch.isinf(loss):
-                logger.warning(f"Infinite loss detected at step {global_step}")
+                logger.error(f"Infinite loss detected at step {global_step}")
+                logger.error("This indicates gradient explosion. Training will continue with aggressive clipping.")
+                continue
+            
+            # Check for extremely high loss (potential instability)
+            if loss.item() > 50.0:
+                logger.warning(f"Very high loss detected: {loss.item():.4f} at step {global_step}")
+                logger.warning("This may indicate training instability. Consider reducing learning rate.")
+            elif loss.item() > 100.0:
+                logger.error(f"Extremely high loss: {loss.item():.4f} at step {global_step}")
+                logger.error("Skipping this step to prevent gradient explosion.")
                 continue
             
             # Backward pass
             accelerator.backward(loss)
             
-            # Gradient clipping for stability
+            # Gradient clipping for stability (prevent exploding gradients)
             if accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                # Use more aggressive clipping initially to prevent NaN loss
+                max_norm = 0.5 if global_step < 100 else 1.0
+                grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+                
+                # Log gradient norm for first few steps
+                if global_step < 10 or global_step % 100 == 0:
+                    logger.info(f"Step {global_step} - Gradient norm: {grad_norm:.4f} (clipped to {max_norm})")
+                
+                # Check for problematic gradients
+                if grad_norm > 10.0:
+                    logger.warning(f"Large gradient norm detected: {grad_norm:.4f} at step {global_step}")
+                elif torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    logger.error(f"Invalid gradient norm: {grad_norm} at step {global_step}")
+                    continue
             
             optimizer.step()
             scheduler.step()
