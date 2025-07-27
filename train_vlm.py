@@ -39,23 +39,28 @@ logger = logging.getLogger(__name__)
 VLM_CONFIGS = {
     'HuggingFaceTB/SmolVLM-256M-Instruct': {
         'max_length': 2048,
-        'description': 'Smallest VLM (256M params) - fastest inference, basic performance'
+        'description': 'Smallest VLM (256M params) - fastest inference, basic performance',
+        'memory_requirement': 'low'
     },
     'HuggingFaceTB/SmolVLM-500M-Instruct': {
         'max_length': 2048,
-        'description': 'Small VLM (500M params) - good balance of speed and performance'
+        'description': 'Small VLM (500M params) - good balance of speed and performance',
+        'memory_requirement': 'medium'
     },
     'HuggingFaceTB/SmolVLM-Instruct': {
         'max_length': 2048,
-        'description': 'Standard VLM (2.2B params) - best performance, slower inference'
+        'description': 'Standard VLM (2.2B params) - best performance, slower inference',
+        'memory_requirement': 'high'
     },
     'microsoft/Phi-3.5-vision-instruct': {
         'max_length': 4096,
-        'description': 'Microsoft Phi-3.5 Vision (4.2B params) - strong performance'
+        'description': 'Microsoft Phi-3.5 Vision (4.2B params) - strong performance',
+        'memory_requirement': 'high'
     },
     'Qwen/Qwen2-VL-2B-Instruct': {
         'max_length': 32768,
-        'description': 'Qwen2-VL (2B params) - excellent for complex reasoning'
+        'description': 'Qwen2-VL (2B params) - excellent for complex reasoning',
+        'memory_requirement': 'high'
     }
 }
 
@@ -429,7 +434,7 @@ def main():
     parser.add_argument('--model', type=str, 
                       choices=list(VLM_CONFIGS.keys()),
                       default='HuggingFaceTB/SmolVLM-500M-Instruct',
-                      help='VLM model to use')
+                      help='VLM model to use (auto-selects smaller model for low memory)')
     parser.add_argument('--dataset', type=str, default='Mirali33/mb-domars16k',
                       help='HuggingFace dataset name or local path')
     parser.add_argument('--dataset_config', type=str, default=None,
@@ -475,14 +480,44 @@ def main():
     # Setup
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Handle device selection
+    # Auto-select model based on available memory
+    try:
+        import psutil
+        total_memory = psutil.virtual_memory().total / (1024**3)  # GB
+        logger.info(f"System memory: {total_memory:.1f}GB")
+        
+        # Auto-select smaller model for low memory systems
+        if total_memory < 8 and args.model == 'HuggingFaceTB/SmolVLM-500M-Instruct':
+            logger.info("Low memory detected - auto-switching to smaller model")
+            args.model = 'HuggingFaceTB/SmolVLM-256M-Instruct'
+            logger.info(f"Selected model: {args.model}")
+        elif total_memory < 16 and args.model in ['HuggingFaceTB/SmolVLM-Instruct', 'microsoft/Phi-3.5-vision-instruct', 'Qwen/Qwen2-VL-2B-Instruct']:
+            logger.info("Medium memory detected - auto-switching to medium model")
+            args.model = 'HuggingFaceTB/SmolVLM-500M-Instruct'
+            logger.info(f"Selected model: {args.model}")
+    except ImportError:
+        logger.info("psutil not available - using default model selection")
+    
+    # Handle device selection with memory considerations
     if args.device == 'auto':
         if torch.cuda.is_available():
             args.device = 'cuda'
             logger.info("GPU available, using CUDA")
         elif torch.backends.mps.is_available():
-            args.device = 'mps'
-            logger.info("MPS available, using Metal GPU acceleration")
+            # Check available memory for MPS
+            try:
+                import psutil
+                total_memory = psutil.virtual_memory().total / (1024**3)  # GB
+                if total_memory < 16:  # Less than 16GB RAM
+                    logger.warning(f"System has {total_memory:.1f}GB RAM - MPS may run out of memory")
+                    logger.info("Using CPU for better stability")
+                    args.device = 'cpu'
+                else:
+                    args.device = 'mps'
+                    logger.info("MPS available, using Metal GPU acceleration")
+            except ImportError:
+                args.device = 'mps'
+                logger.info("MPS available, using Metal GPU acceleration")
         else:
             args.device = 'cpu'
             logger.info("No GPU acceleration available, using CPU")
@@ -521,22 +556,65 @@ def main():
     if args.use_wandb and accelerator.is_main_process:
         wandb.init(project='vlm-classification', config=vars(args))
     
-    # Load dataset
+    # Load dataset with timeout and better error handling
     logger.info(f"Loading dataset: {args.dataset}")
+    
+    # Quick check if dataset exists (for common datasets)
+    if args.dataset.startswith('Mirali33/mb-'):
+        logger.info("Detected MarsBench dataset - this may take a moment to download...")
+    elif args.dataset.startswith('hf-internal-testing/'):
+        logger.info("Using internal test dataset...")
+    else:
+        logger.info("Loading custom dataset...")
+    
     try:
-        if args.dataset_config:
-            logger.info(f"Loading with config: {args.dataset_config}")
-            dataset = load_dataset(args.dataset, args.dataset_config)
-        else:
-            logger.info("Loading dataset without config...")
-            dataset = load_dataset(args.dataset)
-        logger.info(f"✓ Dataset loaded successfully!")
-        logger.info(f"Available splits: {list(dataset.keys())}")
-        for split, data in dataset.items():
-            logger.info(f"  {split}: {len(data)} samples")
+        import signal
+        
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Dataset loading timed out after 300 seconds")
+        
+        # Set timeout for dataset loading (5 minutes)
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(300)
+        
+        try:
+            if args.dataset_config:
+                logger.info(f"Loading with config: {args.dataset_config}")
+                dataset = load_dataset(args.dataset, args.dataset_config)
+            else:
+                logger.info("Loading dataset without config...")
+                dataset = load_dataset(args.dataset)
+            
+            # Cancel timeout
+            signal.alarm(0)
+            
+            logger.info(f"✓ Dataset loaded successfully!")
+            logger.info(f"Available splits: {list(dataset.keys())}")
+            for split, data in dataset.items():
+                logger.info(f"  {split}: {len(data)} samples")
+                
+        except TimeoutError:
+            logger.error("Dataset loading timed out! This could be due to:")
+            logger.error("1. Slow internet connection")
+            logger.error("2. Large dataset being downloaded")
+            logger.error("3. HuggingFace server issues")
+            logger.error("Try again or use a smaller dataset for testing")
+            return
+        except Exception as e:
+            signal.alarm(0)  # Cancel timeout
+            raise e
+            
     except Exception as e:
         logger.error(f"Failed to load dataset: {e}")
-        logger.info("Please ensure the dataset exists and is accessible")
+        logger.error("Troubleshooting tips:")
+        logger.error("1. Check your internet connection")
+        logger.error("2. Verify the dataset name is correct")
+        logger.error("3. Try with --max_samples 100 to test with a small subset")
+        logger.error("4. Check if you need to login: huggingface-cli login")
+        
+        # Offer to use a test dataset instead
+        logger.info("Would you like to try with a small test dataset?")
+        logger.info("You can run: python train_vlm.py --dataset hf-internal-testing/fixtures_image_utils --max_samples 10")
         return
     
     # Auto-detect dataset information
