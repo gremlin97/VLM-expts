@@ -373,7 +373,10 @@ Answer: [Provide only the class name for the dominant category]"""
 
 def auto_detect_dataset_info(dataset, image_column: str = 'image', label_column: str = 'label'):
     """Auto-detect dataset information including class names and descriptions."""
+    logger.info("Auto-detecting dataset information...")
+    
     # Get a sample to inspect the data
+    logger.info("Inspecting dataset sample...")
     sample = dataset[0] if hasattr(dataset, '__getitem__') else next(iter(dataset))
     
     # Auto-detect columns if they exist
@@ -522,9 +525,15 @@ def main():
     logger.info(f"Loading dataset: {args.dataset}")
     try:
         if args.dataset_config:
+            logger.info(f"Loading with config: {args.dataset_config}")
             dataset = load_dataset(args.dataset, args.dataset_config)
         else:
+            logger.info("Loading dataset without config...")
             dataset = load_dataset(args.dataset)
+        logger.info(f"✓ Dataset loaded successfully!")
+        logger.info(f"Available splits: {list(dataset.keys())}")
+        for split, data in dataset.items():
+            logger.info(f"  {split}: {len(data)} samples")
     except Exception as e:
         logger.error(f"Failed to load dataset: {e}")
         logger.info("Please ensure the dataset exists and is accessible")
@@ -532,9 +541,13 @@ def main():
     
     # Auto-detect dataset information
     train_split = 'train' if 'train' in dataset else list(dataset.keys())[0]
+    logger.info(f"Using '{train_split}' split for analysis")
+    
     image_column, label_column, class_names, num_classes = auto_detect_dataset_info(
         dataset[train_split], args.image_column, args.label_column
     )
+    
+    logger.info("Dataset analysis completed!")
     
     # Override with user-provided values if specified
     if args.class_names:
@@ -564,40 +577,50 @@ def main():
     # Initialize processor and model
     logger.info(f"Loading VLM: {args.model}")
     try:
+        logger.info("Loading processor...")
         processor = AutoProcessor.from_pretrained(args.model)
+        logger.info("✓ Processor loaded successfully!")
         
         # Set appropriate dtype and device_map based on device
+        logger.info(f"Loading model for device: {args.device}")
         if args.device == 'cpu':
+            logger.info("Loading model with float32 for CPU...")
             model = AutoModelForImageTextToText.from_pretrained(
                 args.model,
                 torch_dtype=torch.float32,
                 device_map=None
             )
+            logger.info("✓ CPU model loaded successfully!")
         elif args.device == 'mps':
             # Use MPS with float32 (MPS doesn't support float16 well)
+            logger.info("Loading model with float32 for MPS...")
             model = AutoModelForImageTextToText.from_pretrained(
                 args.model,
                 torch_dtype=torch.float32,
                 device_map=None
             )
+            logger.info("✓ MPS model loaded successfully!")
         else:
             # Use CUDA with appropriate dtype - prefer bfloat16 for better numerical stability
             try:
                 # Try bfloat16 first (better numerical stability than float16)
+                logger.info("Loading model with bfloat16 for CUDA...")
                 model = AutoModelForImageTextToText.from_pretrained(
                     args.model,
                     torch_dtype=torch.bfloat16,  # Use bfloat16 for better stability
                     device_map="auto"  # Let the model handle device placement
                 )
-                logger.info("Using bfloat16 for CUDA training (better numerical stability)")
+                logger.info("✓ CUDA model loaded with bfloat16 (better numerical stability)")
             except Exception as e:
                 logger.warning(f"bfloat16 not supported, falling back to float32: {e}")
                 # Fallback to float32 if bfloat16 is not supported
+                logger.info("Loading model with float32 fallback...")
                 model = AutoModelForImageTextToText.from_pretrained(
                     args.model,
                     torch_dtype=torch.float32,  # Fallback to float32 for stability
                     device_map="auto"
                 )
+                logger.info("✓ CUDA model loaded with float32 fallback")
         
         # Log model configuration
         logger.info(f"Model config: {model.config}")
