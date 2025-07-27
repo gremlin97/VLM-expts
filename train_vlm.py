@@ -453,6 +453,11 @@ def main():
     
     device = accelerator.device
     
+    # Log accelerator configuration
+    logger.info(f"Accelerator device: {device}")
+    logger.info(f"Accelerator process index: {accelerator.process_index}")
+    logger.info(f"Accelerator is main process: {accelerator.is_main_process}")
+    
     # Log device information
     logger.info(f"Device: {device}")
     logger.info(f"Device type: {device.type}")
@@ -527,10 +532,8 @@ def main():
             model = AutoModelForImageTextToText.from_pretrained(
                 args.model,
                 torch_dtype=torch.float32,
-                device_map=None  # We'll move to MPS manually
+                device_map=None
             )
-            # Move model to MPS device
-            model = model.to('mps')
         else:
             # Use CUDA with appropriate dtype
             model = AutoModelForImageTextToText.from_pretrained(
@@ -559,19 +562,6 @@ def main():
         class_names, image_column=image_column, label_column=label_column,
         max_length=config['max_length']
     )
-    
-    # Test model with a single sample to ensure it works
-    logger.info("Testing model with a single sample...")
-    test_sample = train_dataset[0]
-    with torch.no_grad():
-        test_outputs = model(
-            input_ids=test_sample['input_ids'].unsqueeze(0),
-            attention_mask=test_sample['attention_mask'].unsqueeze(0),
-            pixel_values=test_sample['pixel_values'].unsqueeze(0),
-            labels=test_sample['labels'].unsqueeze(0)
-        )
-        logger.info(f"Test loss: {test_outputs.loss}")
-        logger.info(f"Test loss type: {type(test_outputs.loss)}")
     
     # Handle validation split
     val_dataset = None
@@ -682,9 +672,22 @@ def main():
             pixel_values = batch['pixel_values']
             labels = batch['labels']
             
+            # Debug: log device information for first few steps
+            if global_step < 5:
+                logger.info(f"Step {global_step} - Input device: {input_ids.device}")
+                logger.info(f"Step {global_step} - Model device: {next(model.parameters()).device}")
+                logger.info(f"Step {global_step} - Labels shape: {labels.shape}")
+                logger.info(f"Step {global_step} - Labels contains -100: {(labels == -100).any()}")
+            
             # Check for NaN values in inputs
             if torch.isnan(input_ids).any() or torch.isnan(pixel_values).any():
                 logger.warning(f"NaN detected in inputs at step {global_step}")
+                continue
+            
+            # Check device consistency
+            model_device = next(model.parameters()).device
+            if input_ids.device != model_device:
+                logger.warning(f"Device mismatch at step {global_step}: inputs on {input_ids.device}, model on {model_device}")
                 continue
                 
             outputs = model(
