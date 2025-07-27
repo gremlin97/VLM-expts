@@ -67,12 +67,22 @@ def vlm_collate_fn(batch):
     pixel_values = [item['pixel_values'] for item in batch]
     labels = [item['labels'] for item in batch]
     
-    # Debug: print tensor sizes
-    if len(input_ids) > 0:
-        logger.debug(f"Batch sizes: {[len(ids) for ids in input_ids]}")
+    # Validate that all items have the required keys
+    if not all(item in batch[0] for item in ['input_ids', 'attention_mask', 'pixel_values', 'labels']):
+        raise ValueError("Batch items must contain 'input_ids', 'attention_mask', 'pixel_values', and 'labels'")
+    
+    # Check for empty batch
+    if len(batch) == 0:
+        raise ValueError("Empty batch provided to collate function")
     
     # Pad input_ids and attention_masks to the same length
     max_length = max(len(ids) for ids in input_ids)
+    
+    # Debug: print tensor sizes
+    if len(input_ids) > 0:
+        logger.debug(f"Batch sizes: {[len(ids) for ids in input_ids]}")
+        logger.debug(f"Label sizes: {[len(label) for label in labels]}")
+        logger.debug(f"Max length: {max_length}")
     
     padded_input_ids = []
     padded_attention_masks = []
@@ -94,12 +104,34 @@ def vlm_collate_fn(batch):
         padded_input_ids.append(padded_ids)
         padded_attention_masks.append(padded_mask)
     
+    # Pad labels to the same length as input_ids
+    padded_labels = []
+    for i, label in enumerate(labels):
+        try:
+            # Ensure we have the right data type
+            label = label.to(torch.long)
+            
+            # Pad to max_length
+            padding_length = max_length - len(label)
+            if padding_length > 0:
+                # Use -100 for padding in labels (this tells the model to ignore these tokens)
+                padded_label = torch.cat([label, torch.full((padding_length,), -100, dtype=torch.long)])
+            else:
+                padded_label = label
+            
+            padded_labels.append(padded_label)
+        except Exception as e:
+            logger.error(f"Error processing label {i}: {e}")
+            logger.error(f"Label shape: {label.shape if hasattr(label, 'shape') else 'no shape'}")
+            logger.error(f"Label type: {type(label)}")
+            raise
+    
     # Stack all tensors
     return {
         'input_ids': torch.stack(padded_input_ids),
         'attention_mask': torch.stack(padded_attention_masks),
         'pixel_values': torch.stack(pixel_values),
-        'labels': torch.stack(labels)
+        'labels': torch.stack(padded_labels)
     }
 
 class VLMDataset(torch.utils.data.Dataset):
@@ -187,6 +219,17 @@ class VLMDataset(torch.utils.data.Dataset):
         
         # Set labels to -100 for user input (before assistant response)
         labels[:assistant_start] = -100
+        
+        # Ensure labels have the same length as input_ids
+        if len(labels) != len(input_ids):
+            logger.warning(f"Label length mismatch for sample {idx}: labels={len(labels)}, input_ids={len(input_ids)}")
+            # Truncate or pad labels to match input_ids length
+            if len(labels) > len(input_ids):
+                labels = labels[:len(input_ids)]
+            else:
+                # Pad with -100
+                padding_length = len(input_ids) - len(labels)
+                labels = torch.cat([labels, torch.full((padding_length,), -100, dtype=torch.long)])
         
         # Debug: check for NaN values
         if torch.isnan(inputs['input_ids']).any():
