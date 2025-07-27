@@ -364,7 +364,7 @@ def main():
     parser.add_argument('--max_samples', type=int, default=None,
                       help='Maximum number of samples to use from each split (for testing)')
     parser.add_argument('--device', type=str, default='auto',
-                      help='Device to use (auto/cuda/cpu). auto will use GPU if available')
+                      help='Device to use (auto/cuda/mps/cpu). auto will use GPU if available')
     
     args = parser.parse_args()
     
@@ -376,12 +376,19 @@ def main():
         if torch.cuda.is_available():
             args.device = 'cuda'
             logger.info("GPU available, using CUDA")
+        elif torch.backends.mps.is_available():
+            args.device = 'mps'
+            logger.info("MPS available, using Metal GPU acceleration")
         else:
             args.device = 'cpu'
-            logger.info("GPU not available, using CPU")
+            logger.info("No GPU acceleration available, using CPU")
     elif args.device == 'cuda' and not torch.cuda.is_available():
-        logger.warning("CUDA requested but not available, using CPU")
-        args.device = 'cpu'
+        if torch.backends.mps.is_available():
+            logger.warning("CUDA not available, but MPS is available. Using MPS for GPU acceleration")
+            args.device = 'mps'
+        else:
+            logger.warning("CUDA requested but not available, using CPU")
+            args.device = 'cpu'
     
     # Initialize accelerator with device configuration
     if args.device == 'cpu':
@@ -477,8 +484,8 @@ def main():
     logger.info(f"Train: {len(train_dataset)}, Val: {val_len}, Test: {test_len}")
     
     # Create dataloaders with appropriate settings for device
-    num_workers = 2 if args.device != 'cpu' else 0
-    pin_memory = args.device != 'cpu'
+    num_workers = 2 if args.device not in ['cpu'] else 0
+    pin_memory = args.device not in ['cpu']
     
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, 

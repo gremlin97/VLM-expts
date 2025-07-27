@@ -196,8 +196,12 @@ def evaluate_vlm_model(model, dataloader, device, class_names, processor):
     all_predictions = []
     all_labels = []
     
+    # Add progress bar for evaluation
+    from tqdm import tqdm
+    progress_bar = tqdm(dataloader, desc="Evaluating", leave=False)
+    
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in progress_bar:
             pixel_values = batch['pixel_values'].to(device)
             labels = batch['labels'].to(device)
             
@@ -205,8 +209,8 @@ def evaluate_vlm_model(model, dataloader, device, class_names, processor):
             generated_ids = model.generate(
                 pixel_values=pixel_values,
                 max_new_tokens=100,
-                do_sample=False,
-                temperature=0.0
+                do_sample=False
+                # Removed temperature=0.0 as it's not needed for deterministic generation
             )
             
             # Decode responses
@@ -377,7 +381,7 @@ def main():
     parser.add_argument('--max_samples', type=int, default=None,
                       help='Maximum number of samples to use from each split (for testing)')
     parser.add_argument('--device', type=str, default='auto',
-                      help='Device to use (auto/cuda/cpu). auto will use GPU if available')
+                      help='Device to use (auto/cuda/mps/cpu). auto will use GPU if available')
     
     # Custom prompts
     parser.add_argument('--system_instructions', type=str, default=None,
@@ -395,12 +399,19 @@ def main():
         if torch.cuda.is_available():
             args.device = 'cuda'
             logger.info("GPU available, using CUDA")
+        elif torch.backends.mps.is_available():
+            args.device = 'mps'
+            logger.info("MPS available, using Metal GPU acceleration")
         else:
             args.device = 'cpu'
-            logger.info("GPU not available, using CPU")
+            logger.info("No GPU acceleration available, using CPU")
     elif args.device == 'cuda' and not torch.cuda.is_available():
-        logger.warning("CUDA requested but not available, using CPU")
-        args.device = 'cpu'
+        if torch.backends.mps.is_available():
+            logger.warning("CUDA not available, but MPS is available. Using MPS for GPU acceleration")
+            args.device = 'mps'
+        else:
+            logger.warning("CUDA requested but not available, using CPU")
+            args.device = 'cpu'
     
     # Initialize accelerator with device configuration
     if args.device == 'cpu':
@@ -409,6 +420,17 @@ def main():
         accelerator = Accelerator()
     
     device = accelerator.device
+    
+    # Log device information
+    logger.info(f"Device: {device}")
+    logger.info(f"Device type: {device.type}")
+    if device.type == 'cuda':
+        logger.info(f"GPU: {torch.cuda.get_device_name(device)}")
+        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(device).total_memory / 1e9:.1f} GB")
+    elif device.type == 'mps':
+        logger.info("MPS: Apple Silicon GPU acceleration enabled")
+    elif device.type == 'cpu':
+        logger.info("CPU: No GPU acceleration available")
     
     if args.use_wandb and accelerator.is_main_process:
         wandb.init(project='vlm-classification', config=vars(args))
@@ -468,8 +490,17 @@ def main():
                 torch_dtype=torch.float32,
                 device_map=None
             )
+        elif args.device == 'mps':
+            # Use MPS with float32 (MPS doesn't support float16 well)
+            model = AutoModelForVision2Seq.from_pretrained(
+                args.model,
+                torch_dtype=torch.float32,
+                device_map=None  # We'll move to MPS manually
+            )
+            # Move model to MPS device
+            model = model.to('mps')
         else:
-            # Use GPU with appropriate dtype
+            # Use CUDA with appropriate dtype
             model = AutoModelForVision2Seq.from_pretrained(
                 args.model,
                 torch_dtype=torch.float16,  # Use float16 for GPU efficiency
@@ -533,8 +564,8 @@ def main():
         )
     
     # Create dataloaders with appropriate settings for device
-    num_workers = 2 if args.device != 'cpu' else 0
-    pin_memory = args.device != 'cpu'
+    num_workers = 2 if args.device not in ['cpu'] else 0
+    pin_memory = args.device not in ['cpu']
     
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, 
@@ -590,7 +621,11 @@ def main():
         epoch_loss = 0
         num_batches = 0
         
-        for batch in train_dataloader:
+        # Add progress bar for training
+        from tqdm import tqdm
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
+        
+        for batch in progress_bar:
             # Forward pass
             outputs = model(
                 input_ids=batch['input_ids'],
@@ -611,13 +646,23 @@ def main():
             num_batches += 1
             global_step += 1
             
-            # Log training
-            if args.use_wandb and accelerator.is_main_process and global_step % 10 == 0:
-                wandb.log({
-                    'train_loss': loss.item(),
-                    'learning_rate': scheduler.get_last_lr()[0],
-                    'global_step': global_step
-                })
+            # Update progress bar
+            progress_bar.set_postfix({
+                'loss': f"{loss.item():.4f}",
+                'lr': f"{scheduler.get_last_lr()[0]:.2e}",
+                'step': global_step
+            })
+            
+            # Log training more frequently
+            if global_step % 10 == 0:
+                if accelerator.is_main_process:
+                    logger.info(f"Step {global_step} - Train Loss: {loss.item():.4f} - LR: {scheduler.get_last_lr()[0]:.2e}")
+                if args.use_wandb and accelerator.is_main_process:
+                    wandb.log({
+                        'train_loss': loss.item(),
+                        'learning_rate': scheduler.get_last_lr()[0],
+                        'global_step': global_step
+                    })
             
             # Evaluate
             if global_step % args.eval_steps == 0 and val_dataloader:
