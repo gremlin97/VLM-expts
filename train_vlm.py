@@ -504,11 +504,11 @@ def main():
                       help='Description of the classification task')
     
     # Training arguments
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size (1 recommended for VLM stability)')
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of epochs')
-    parser.add_argument('--learning_rate', type=float, default=1e-6, help='Learning rate (lowered for gradient stability)')
+    parser.add_argument('--learning_rate', type=float, default=1e-7, help='Learning rate (ultra-conservative for VLM stability)')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
-    parser.add_argument('--warmup_ratio', type=float, default=0.2, help='Warmup ratio (increased for stability)')
+    parser.add_argument('--warmup_ratio', type=float, default=0.4, help='Warmup ratio (extended for VLM stability)')
     
     # System arguments
     parser.add_argument('--output_dir', type=str, default='./vlm_results', 
@@ -744,11 +744,13 @@ def main():
     
     # Log training stability recommendations
     logger.info("=" * 60)
-    logger.info("TRAINING STABILITY SETTINGS:")
-    logger.info(f"  Learning Rate: {args.learning_rate} (recommended: 1e-6 to 5e-7 for stability)")
-    logger.info(f"  Warmup Ratio: {args.warmup_ratio} (recommended: 0.2+ for VLM fine-tuning)")
-    logger.info(f"  Batch Size: {args.batch_size} (smaller batches = more stable)")
-    logger.info(f"  Gradient Clipping: 0.5 → 1.0 (aggressive → relaxed)")
+    logger.info("ULTRA-CONSERVATIVE VLM TRAINING SETTINGS:")
+    logger.info(f"  Learning Rate: {args.learning_rate} (ultra-conservative for VLM stability)")
+    logger.info(f"  Warmup Ratio: {args.warmup_ratio} (extended warmup for VLM fine-tuning)")
+    logger.info(f"  Batch Size: {args.batch_size} (batch size 1 for maximum stability)")
+    logger.info(f"  Gradient Clipping: 0.05 → 0.3 (ultra-aggressive → conservative)")
+    logger.info(f"  Optimizer: AdamW with eps=1e-5 (prevents division by small numbers)")
+    logger.info(f"  Scheduler: Cosine with warmup (better for language model training)")
     logger.info("=" * 60)
     
     # Create datasets
@@ -818,19 +820,24 @@ def main():
         num_workers=num_workers, pin_memory=pin_memory, collate_fn=lambda batch: vlm_collate_fn(batch, processor)
     ) if test_dataset else None
     
-    # Setup training with better numerical stability
+    # Setup training with ultra-conservative settings for VLM fine-tuning
+    # Based on Hugging Face best practices for language model fine-tuning
     optimizer = AdamW(
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
-        eps=1e-8,  # Slightly larger epsilon for numerical stability
-        betas=(0.9, 0.999)  # Standard Adam betas
+        eps=1e-5,  # Much larger epsilon for VLM stability (prevents division by small numbers)
+        betas=(0.9, 0.999)  # Standard Adam betas (more stable than custom betas)
     )
     
     total_steps = len(train_dataloader) * args.num_epochs
     warmup_steps = int(total_steps * args.warmup_ratio)
     
-    scheduler = get_linear_schedule_with_warmup(
+    # Use cosine schedule with warmup for better VLM training stability
+    # Based on Hugging Face best practices for language model fine-tuning
+    from transformers import get_cosine_schedule_with_warmup
+    
+    scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps
@@ -968,11 +975,12 @@ def main():
                 continue
             
             # Check for extremely high loss (potential instability)
-            if loss.item() > 50.0:
-                logger.warning(f"Very high loss detected: {loss.item():.4f} at step {global_step}")
+            # Based on Hugging Face best practices for language model training
+            if loss.item() > 20.0:
+                logger.warning(f"High loss detected: {loss.item():.4f} at step {global_step}")
                 logger.warning("This may indicate training instability. Consider reducing learning rate.")
-            elif loss.item() > 100.0:
-                logger.error(f"Extremely high loss: {loss.item():.4f} at step {global_step}")
+            elif loss.item() > 50.0:
+                logger.error(f"Very high loss: {loss.item():.4f} at step {global_step}")
                 logger.error("Skipping this step to prevent gradient explosion.")
                 continue
             
@@ -980,17 +988,26 @@ def main():
             accelerator.backward(loss)
             
             # Gradient clipping for stability (prevent exploding gradients)
+            # Based on Hugging Face best practices for language model training
             if accelerator.sync_gradients:
-                # Use more aggressive clipping initially to prevent NaN loss
-                max_norm = 0.5 if global_step < 100 else 1.0
+                # Ultra-conservative gradient clipping for VLM training
+                if global_step < 100:
+                    max_norm = 0.05  # Extremely aggressive clipping in early steps
+                elif global_step < 500:
+                    max_norm = 0.1   # Very aggressive clipping during warmup
+                elif global_step < 1000:
+                    max_norm = 0.2   # Moderate clipping after warmup
+                else:
+                    max_norm = 0.3   # Relaxed clipping for stable training
+                
                 grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=max_norm)
                 
                 # Track gradient stability
                 clipping_ratio = grad_norm / max_norm if max_norm > 0 else 0
                 gradient_history.append(clipping_ratio)
                 
-                # Count consecutive high gradient steps
-                if clipping_ratio > 20:
+                # Count consecutive high gradient steps (lowered thresholds for VLM)
+                if clipping_ratio > 5:  # Much lower threshold for VLM training
                     high_gradient_count += 1
                 else:
                     high_gradient_count = 0
@@ -1001,26 +1018,26 @@ def main():
                               f"Clipping ratio: {clipping_ratio:.1f}x")
                     
                     # Provide guidance based on gradient behavior
-                    if clipping_ratio > 50:
+                    if clipping_ratio > 15:
                         logger.warning(f"Extreme gradient clipping ({clipping_ratio:.1f}x)! Consider:")
-                        logger.warning("  • Further reducing learning rate (try 5e-7 or 1e-7)")
+                        logger.warning("  • Further reducing learning rate (try 5e-8 or 1e-8)")
                         logger.warning("  • Increasing warmup steps")
                         logger.warning("  • Checking data for anomalies")
-                    elif clipping_ratio > 10:
+                    elif clipping_ratio > 3:
                         logger.warning(f"High gradient clipping ({clipping_ratio:.1f}x). Training may be unstable.")
-                    elif clipping_ratio < 1.5 and global_step > 100:
+                    elif clipping_ratio < 1.1 and global_step > 200:
                         logger.info(f"Gradients are well-behaved ({clipping_ratio:.1f}x). Training is stable.")
                 
                 # Early warning system for persistent instability
-                if high_gradient_count >= 50:
+                if high_gradient_count >= 20:  # Much lower threshold
                     logger.error(f"Training has been unstable for {high_gradient_count} consecutive steps!")
                     logger.error("This indicates the learning rate is still too high or there are data issues.")
                     logger.error("Consider stopping training and:")
                     logger.error("  • Reducing learning rate by another order of magnitude")
-                    logger.error("  • Increasing warmup ratio to 0.3 or higher")
+                    logger.error("  • Increasing warmup ratio to 0.5 or higher")
                     logger.error("  • Checking for data preprocessing issues")
                     # Don't automatically stop, but give strong warning
-                elif high_gradient_count >= 20 and global_step % 10 == 0:
+                elif high_gradient_count >= 5 and global_step % 10 == 0:  # Much lower threshold
                     logger.warning(f"Training unstable for {high_gradient_count} steps. Monitor closely.")
                 
                 # Check for problematic gradients
