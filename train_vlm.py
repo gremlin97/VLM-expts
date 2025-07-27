@@ -376,6 +376,8 @@ def main():
     parser.add_argument('--eval_steps', type=int, default=100, help='Evaluation frequency')
     parser.add_argument('--max_samples', type=int, default=None,
                       help='Maximum number of samples to use from each split (for testing)')
+    parser.add_argument('--device', type=str, default='auto',
+                      help='Device to use (auto/cuda/cpu). auto will use GPU if available')
     
     # Custom prompts
     parser.add_argument('--system_instructions', type=str, default=None,
@@ -387,7 +389,25 @@ def main():
     
     # Setup
     os.makedirs(args.output_dir, exist_ok=True)
-    accelerator = Accelerator()
+    
+    # Handle device selection
+    if args.device == 'auto':
+        if torch.cuda.is_available():
+            args.device = 'cuda'
+            logger.info("GPU available, using CUDA")
+        else:
+            args.device = 'cpu'
+            logger.info("GPU not available, using CPU")
+    elif args.device == 'cuda' and not torch.cuda.is_available():
+        logger.warning("CUDA requested but not available, using CPU")
+        args.device = 'cpu'
+    
+    # Initialize accelerator with device configuration
+    if args.device == 'cpu':
+        accelerator = Accelerator(cpu=True)
+    else:
+        accelerator = Accelerator()
+    
     device = accelerator.device
     
     if args.use_wandb and accelerator.is_main_process:
@@ -440,11 +460,21 @@ def main():
     logger.info(f"Loading VLM: {args.model}")
     try:
         processor = AutoProcessor.from_pretrained(args.model)
-        model = AutoModelForVision2Seq.from_pretrained(
-            args.model,
-            torch_dtype=torch.float32,  # Use float32 for CPU
-            device_map=None  # Force CPU usage
-        )
+        
+        # Set appropriate dtype and device_map based on device
+        if args.device == 'cpu':
+            model = AutoModelForVision2Seq.from_pretrained(
+                args.model,
+                torch_dtype=torch.float32,
+                device_map=None
+            )
+        else:
+            # Use GPU with appropriate dtype
+            model = AutoModelForVision2Seq.from_pretrained(
+                args.model,
+                torch_dtype=torch.float16,  # Use float16 for GPU efficiency
+                device_map="auto"  # Let the model handle device placement
+            )
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         return
@@ -502,19 +532,22 @@ def main():
             max_length=config['max_length']
         )
     
-    # Create dataloaders
+    # Create dataloaders with appropriate settings for device
+    num_workers = 2 if args.device != 'cpu' else 0
+    pin_memory = args.device != 'cpu'
+    
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, 
-        num_workers=0, pin_memory=False, collate_fn=vlm_collate_fn
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=vlm_collate_fn
     )
     val_dataloader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=0, pin_memory=False, collate_fn=vlm_collate_fn
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=vlm_collate_fn
     ) if val_dataset else None
     
     test_dataloader = DataLoader(
         test_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=0, pin_memory=False, collate_fn=vlm_collate_fn
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=vlm_collate_fn
     ) if test_dataset else None
     
     # Setup training

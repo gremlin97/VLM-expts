@@ -363,14 +363,32 @@ def main():
     parser.add_argument('--eval_steps', type=int, default=100, help='Evaluation frequency')
     parser.add_argument('--max_samples', type=int, default=None,
                       help='Maximum number of samples to use from each split (for testing)')
+    parser.add_argument('--device', type=str, default='auto',
+                      help='Device to use (auto/cuda/cpu). auto will use GPU if available')
     
     args = parser.parse_args()
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Initialize accelerator
-    accelerator = Accelerator()
+    # Handle device selection
+    if args.device == 'auto':
+        if torch.cuda.is_available():
+            args.device = 'cuda'
+            logger.info("GPU available, using CUDA")
+        else:
+            args.device = 'cpu'
+            logger.info("GPU not available, using CPU")
+    elif args.device == 'cuda' and not torch.cuda.is_available():
+        logger.warning("CUDA requested but not available, using CPU")
+        args.device = 'cpu'
+    
+    # Initialize accelerator with device configuration
+    if args.device == 'cpu':
+        accelerator = Accelerator(cpu=True)
+    else:
+        accelerator = Accelerator()
+    
     device = accelerator.device
     
     if args.use_wandb and accelerator.is_main_process:
@@ -458,19 +476,22 @@ def main():
     test_len = len(test_dataset) if test_dataset else 0
     logger.info(f"Train: {len(train_dataset)}, Val: {val_len}, Test: {test_len}")
     
-    # Create dataloaders
+    # Create dataloaders with appropriate settings for device
+    num_workers = 2 if args.device != 'cpu' else 0
+    pin_memory = args.device != 'cpu'
+    
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, 
-        num_workers=2, pin_memory=True
+        num_workers=num_workers, pin_memory=pin_memory
     )
     val_dataloader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=2, pin_memory=True
+        num_workers=num_workers, pin_memory=pin_memory
     ) if val_dataset else None
     
     test_dataloader = DataLoader(
         test_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=2, pin_memory=True
+        num_workers=num_workers, pin_memory=pin_memory
     ) if test_dataset else None
     
     # Setup training
