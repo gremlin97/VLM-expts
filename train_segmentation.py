@@ -226,6 +226,11 @@ def compute_segmentation_metrics(predictions, labels, num_classes):
         
         if class_true.sum() > 0:  # Only compute if class exists in ground truth
             iou = jaccard_score(class_true, class_pred, average=None)
+            # jaccard_score with average=None returns an array, we want the first (and only) element
+            if isinstance(iou, np.ndarray):
+                iou = float(iou[0])
+            else:
+                iou = float(iou)
             iou_scores.append(iou)
         else:
             iou_scores.append(0.0)
@@ -557,7 +562,7 @@ def main():
             'best_val_miou': best_val_miou,
             'args': vars(args)
         }
-        
+
         if test_metrics:
             results.update({
                 'test_accuracy': test_metrics['accuracy'],
