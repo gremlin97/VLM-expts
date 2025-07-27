@@ -64,8 +64,14 @@ class MarsSegmentationClassifier:
         
         # Load trained weights
         if os.path.exists(model_path):
-            state_dict = torch.load(model_path, map_location=self.device)
-            self.model.load_state_dict(state_dict)
+            checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+            
+            # Handle both new checkpoint format and old format
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                self.model.load_state_dict(checkpoint)
+            
             logger.info(f"Loaded model weights from {model_path}")
         else:
             raise FileNotFoundError(f"Model file not found: {model_path}")

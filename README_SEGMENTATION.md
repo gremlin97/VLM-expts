@@ -111,11 +111,21 @@ python inference_segmentation.py \
 |-----------|-------------|---------|-------------------|
 | `--model` | Model architecture | `clip-vit-base-patch32` | Choose based on accuracy/speed trade-off |
 | `--dataset` | HuggingFace dataset | `Mirali33/mb-crater_binary_seg` | Any segmentation dataset |
+| `--dataset_config` | Dataset configuration | None | For datasets with configs |
+| `--image_column` | Image column name | `image` | Custom column names |
+| `--mask_column` | Mask column name | `mask` | Segmentation mask column |
+| `--num_classes` | Number of classes | Auto-detected | From class_labels or assumed 2 |
 | `--target_size` | Input image size | 512 | Higher = better detail, slower training |
-| `--batch_size` | Training batch size | 4 | Reduce for larger images/models |
+| `--class_names` | List of class names | Auto-generated | From dataset or generic names |
+| `--batch_size` | Training batch size | 8 | Reduce for larger images/models |
 | `--num_epochs` | Number of epochs | 10 | Segmentation needs more epochs |
 | `--learning_rate` | Learning rate | 1e-4 | Lower than classification |
+| `--weight_decay` | Weight decay | 0.01 | Regularization |
+| `--warmup_ratio` | Warmup ratio | 0.1 | Learning rate scheduling |
 | `--freeze_encoder` | Freeze vision encoder | False | True for faster training |
+| `--use_wandb` | Enable W&B logging | False | Experiment tracking |
+| `--output_dir` | Output directory | `./segmentation_results` | Results location |
+| `--eval_steps` | Evaluation frequency | 100 | How often to evaluate |
 
 ## Performance Metrics
 

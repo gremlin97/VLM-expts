@@ -85,14 +85,14 @@ python train.py \
 ```bash
 # Single image prediction (class names auto-loaded)
 python inference.py \
-    --model_path ./results/best_model.pth \
+    --model_path ./clip_results/best_model.pth \
     --model_key clip-vit-base-patch32 \
     --image_path mars_image.jpg \
     --visualize
 
 # Batch prediction with custom class names
 python inference.py \
-    --model_path ./results/best_model.pth \
+    --model_path ./clip_results/best_model.pth \
     --model_key clip-vit-base-patch32 \
     --class_names rock no-rock \
     --image_dir /path/to/images/ \
@@ -117,16 +117,20 @@ python train.py \
 |-----------|-------------|---------|
 | `--model` | Model architecture | `clip-vit-base-patch32` |
 | `--dataset` | HuggingFace dataset name | `Mirali33/mb-domars16k` |
-| `--num_classes` | Number of classes (auto-detected) | None |
-| `--class_names` | List of class names | Auto-generated |
+| `--dataset_config` | Dataset configuration | None |
 | `--image_column` | Image column name | `image` |
 | `--label_column` | Label column name | `label` |
+| `--num_classes` | Number of classes (auto-detected) | None |
+| `--class_names` | List of class names | Auto-generated |
 | `--batch_size` | Training batch size | 32 |
 | `--num_epochs` | Number of epochs | 10 |
 | `--learning_rate` | Learning rate | 5e-5 |
+| `--weight_decay` | Weight decay | 0.01 |
+| `--warmup_ratio` | Warmup ratio | 0.1 |
 | `--freeze_encoder` | Freeze vision encoder weights | False |
 | `--use_wandb` | Enable W&B logging | False |
 | `--output_dir` | Output directory | `./results` |
+| `--eval_steps` | Evaluation frequency | 100 |
 
 ### Training Strategies
 
@@ -173,7 +177,7 @@ Classification Head
   - Dropout(0.1)
   - Linear(hidden → hidden/2) + ReLU
   - Dropout(0.1)  
-  - Linear(hidden/2 → 15)
+  - Linear(hidden/2 → num_classes)
        ↓
 Terrain Class Logits
 ```
@@ -183,7 +187,7 @@ Terrain Class Logits
 After training:
 
 ```
-results/
+clip_results/
 ├── best_model.pth        # Best model weights
 ├── final_model.pth       # Final model weights
 ├── results.json          # Evaluation metrics
@@ -253,11 +257,11 @@ python train.py --num_epochs 1 --batch_size 4 --eval_steps 10
 
 ```
 VLM/
-├── train.py              # Main training script
-├── inference.py          # Inference script
-├── run_training.sh       # Training helper script
-├── requirements.txt      # Dependencies
-└── README.md            # This file
+├── train.py                    # Main training script
+├── inference.py                # Inference script
+├── run_training.sh             # Training helper script
+├── requirements.txt            # Dependencies
+└── README.md                  # This file
 ```
 
 ## License

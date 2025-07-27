@@ -225,6 +225,8 @@ def main():
                       help='Output directory')
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases')
     parser.add_argument('--eval_steps', type=int, default=100, help='Evaluation frequency')
+    parser.add_argument('--max_samples', type=int, default=None,
+                      help='Maximum number of samples to use from each split (for testing)')
     
     args = parser.parse_args()
     
@@ -242,6 +244,14 @@ def main():
         dataset = load_dataset(args.dataset, args.dataset_config)
     else:
         dataset = load_dataset(args.dataset)
+    
+    # Limit dataset size if max_samples is specified
+    if args.max_samples is not None:
+        logger.info(f"Limiting each split to {args.max_samples} samples for testing")
+        for split in dataset.keys():
+            if len(dataset[split]) > args.max_samples:
+                dataset[split] = dataset[split].select(range(args.max_samples))
+                logger.info(f"Limited {split} split to {len(dataset[split])} samples")
     
     # Auto-detect number of classes and class names
     if args.num_classes is None:
@@ -412,9 +422,16 @@ def main():
                 if val_metrics['accuracy'] > best_val_accuracy:
                     best_val_accuracy = val_metrics['accuracy']
                     if accelerator.is_main_process:
+                        checkpoint = {
+                            'model_state_dict': accelerator.unwrap_model(model).state_dict(),
+                            'model_architecture': args.model,
+                            'best_val_accuracy': best_val_accuracy,
+                            'args': vars(args)
+                        }
                         torch.save(
-                            accelerator.unwrap_model(model).state_dict(),
-                            os.path.join(args.output_dir, 'best_model.pth')
+                            checkpoint,
+                            os.path.join(args.output_dir, 'best_model.pth'),
+                            _use_new_zipfile_serialization=False
                         )
                         logger.info(f"New best model saved: {best_val_accuracy:.4f}")
                 
@@ -432,7 +449,26 @@ def main():
         if accelerator.is_main_process:
             best_model_path = os.path.join(args.output_dir, 'best_model.pth')
             if os.path.exists(best_model_path):
-                model.load_state_dict(torch.load(best_model_path, map_location=device))
+                try:
+                    # Check if the checkpoint is compatible with current model
+                    checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
+                    
+                    # Check if this checkpoint was saved with the same model architecture
+                    if 'model_architecture' in checkpoint:
+                        if checkpoint['model_architecture'] == args.model:
+                            model.load_state_dict(checkpoint['model_state_dict'])
+                            logger.info(f"Successfully loaded best model from {best_model_path}")
+                        else:
+                            logger.warning(f"Checkpoint was saved with {checkpoint['model_architecture']}, but current model is {args.model}")
+                            logger.info("Continuing with current model state for evaluation")
+                    else:
+                        # Try to load anyway (for backward compatibility)
+                        model.load_state_dict(checkpoint)
+                        logger.info(f"Successfully loaded best model from {best_model_path}")
+                        
+                except RuntimeError as e:
+                    logger.warning(f"Could not load best model due to architecture mismatch: {e}")
+                    logger.info("Continuing with current model state for evaluation")
         
         test_metrics = evaluate_model(model, test_dataloader, device, class_names)
     elif val_dataloader:
@@ -476,9 +512,15 @@ def main():
             )
         
         # Save final model
+        final_checkpoint = {
+            'model_state_dict': accelerator.unwrap_model(model).state_dict(),
+            'model_architecture': args.model,
+            'args': vars(args)
+        }
         torch.save(
-            accelerator.unwrap_model(model).state_dict(),
-            os.path.join(args.output_dir, 'final_model.pth')
+            final_checkpoint,
+            os.path.join(args.output_dir, 'final_model.pth'),
+            _use_new_zipfile_serialization=False
         )
         
         if args.use_wandb and test_metrics:
