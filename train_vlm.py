@@ -202,50 +202,31 @@ class VLMDataset(torch.utils.data.Dataset):
         prompt = self.processor.apply_chat_template(messages, add_generation_prompt=False)
         inputs = self.processor(text=prompt, images=[image], return_tensors="pt")
         
-        # CORRECT VLM FINE-TUNING APPROACH FOR CLASSIFICATION
-        # Based on Hugging Face best practices and SmolVLM documentation
+        # OPTIMAL VLM FINE-TUNING APPROACH FOR CLASSIFICATION
+        # Predict only the SINGLE class token - most stable approach
         input_ids = inputs['input_ids'].squeeze(0)
         
-        # For classification tasks, we should only predict the class name token(s)
-        # This is the most stable and efficient approach for VLMs
+        # For classification tasks, we should predict ONLY the last meaningful token
+        # This is the most stable approach and prevents loss oscillation
         
-        # Find the assistant response tokens using the chat template structure
-        # The processor.apply_chat_template creates a specific structure
-        decoded_text = self.processor.decode(input_ids, skip_special_tokens=False)
+        # Find the last meaningful token (not padding or special tokens)
+        last_token_pos = len(input_ids) - 1
+        while last_token_pos > 0 and input_ids[last_token_pos] in [0, 1, 2, self.processor.tokenizer.pad_token_id]:
+            last_token_pos -= 1
         
-        # Look for the actual class name in the decoded text
-        # This ensures we only predict the essential classification tokens
-        class_name_start = decoded_text.rfind(class_name)  # Find last occurrence
+        # Only predict the very last meaningful token
+        assistant_start = last_token_pos
         
-        if class_name_start != -1:
-            # Approximate the token position of the class name
-            # This is more precise than guessing token counts
-            text_before_class = decoded_text[:class_name_start]
-            # Rough estimation: average ~4 characters per token
-            approx_tokens_before = len(text_before_class) // 4
-            
-            # Find the actual class name tokens
-            assistant_start = max(0, min(approx_tokens_before, len(input_ids) - 10))
-            
-            # Fine-tune the position by looking for the class name tokens
-            class_tokens = self.processor.tokenizer.encode(class_name, add_special_tokens=False)
-            
-            # Search for class tokens in the last part of the sequence
-            search_start = max(0, len(input_ids) - 20)
-            for i in range(search_start, len(input_ids) - len(class_tokens) + 1):
-                if input_ids[i:i+len(class_tokens)].tolist() == class_tokens:
-                    assistant_start = i
-                    break
-        else:
-            # Fallback: predict only the last few tokens (most conservative)
-            assistant_start = max(0, len(input_ids) - 5)
+        # Ensure we have at least 1 token to predict
+        if assistant_start >= len(input_ids):
+            assistant_start = len(input_ids) - 1
         
-        logger.debug(f"Sample {idx}: Total tokens={len(input_ids)}, Predicting from token {assistant_start}")
+        logger.debug(f"Sample {idx}: Total tokens={len(input_ids)}, Predicting ONLY token at position {assistant_start}")
         
-        # Create labels - only predict the class name tokens
+        # Create labels - predict ONLY the last token
         labels = input_ids.clone()
         
-        # Mask everything except the class name tokens
+        # Mask everything except the very last token
         labels[:assistant_start] = -100
         
         # Ensure labels have the same length as input_ids
@@ -259,18 +240,12 @@ class VLMDataset(torch.utils.data.Dataset):
                 padding_length = len(input_ids) - len(labels)
                 labels = torch.cat([labels, torch.full((padding_length,), -100, dtype=torch.long)])
         
-        # VALIDATION: Ensure we're predicting the right number of tokens for classification
+        # VALIDATION: Ensure we're predicting exactly 1 token for maximum stability
         tokens_to_predict = (labels != -100).sum().item()
-        if tokens_to_predict > 10:
-            logger.warning(f"Sample {idx}: Predicting {tokens_to_predict} tokens. For classification, fewer is better.")
-            # For classification, we should predict very few tokens (just the class name)
-            # Force predict only the last few tokens containing the class name
+        if tokens_to_predict != 1:
+            logger.warning(f"Sample {idx}: Predicting {tokens_to_predict} tokens. Forcing single token prediction for stability.")
+            # Force predict ONLY the last token for maximum stability
             labels.fill_(-100)
-            labels[-5:] = input_ids[-5:]
-            tokens_to_predict = 5
-        elif tokens_to_predict < 1:
-            logger.error(f"Sample {idx}: No tokens to predict! This will cause training issues.")
-            # Ensure we predict at least the last token
             labels[-1] = input_ids[-1]
             tokens_to_predict = 1
         
@@ -801,7 +776,7 @@ def main():
     logger.info(f"  Learning Rate: {args.learning_rate} (standard for VLM fine-tuning)")
     logger.info(f"  Warmup Ratio: {args.warmup_ratio} (extended warmup for VLM fine-tuning)")
     logger.info(f"  Batch Size: {args.batch_size} (batch size 1 for maximum stability)")
-    logger.info(f"  Gradient Clipping: 0.5 → 1.0 (standard for classification)")
+    logger.info(f"  Gradient Clipping: 0.1 → 1.0 (conservative for single token prediction)")
     logger.info(f"  Optimizer: AdamW with eps=1e-5 (prevents division by small numbers)")
     logger.info(f"  Scheduler: Cosine with warmup (better for language model training)")
     logger.info("=" * 60)
@@ -1043,14 +1018,14 @@ def main():
             # Gradient clipping for stability (prevent exploding gradients)
             # Based on Hugging Face best practices for language model training
             if accelerator.sync_gradients:
-                # Standard gradient clipping for VLM classification
-                # With proper label masking, we can use normal clipping values
+                # Conservative gradient clipping for single token prediction
+                # Single token prediction is more stable, but still needs careful clipping
                 if global_step < 100:
-                    max_norm = 0.5    # Conservative in early steps
+                    max_norm = 0.1    # Very conservative in early steps
                 elif global_step < 500:
-                    max_norm = 1.0    # Standard during training
+                    max_norm = 0.5    # Conservative during training
                 else:
-                    max_norm = 1.0    # Consistent clipping
+                    max_norm = 1.0    # Standard after warmup
                 
                 grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=max_norm)
                 
