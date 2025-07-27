@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 
 from datasets import load_dataset, Dataset
 from transformers import (
-    AutoProcessor, AutoModelForVision2Seq,
+    AutoProcessor, AutoModelForImageTextToText,
     get_linear_schedule_with_warmup
 )
 from accelerate import Accelerator
@@ -162,11 +162,43 @@ class VLMDataset(torch.utils.data.Dataset):
         prompt = self.processor.apply_chat_template(messages, add_generation_prompt=False)
         inputs = self.processor(text=prompt, images=[image], return_tensors="pt")
         
+        # Create target labels for the assistant response only
+        # We need to find where the assistant response starts in the tokenized sequence
+        input_ids = inputs['input_ids'].squeeze(0)
+        
+        # For VLM training, we want to predict only the assistant response
+        # Create a mask that identifies the assistant response tokens
+        labels = input_ids.clone()
+        
+        # Find the assistant response start by looking for assistant role tokens
+        # This is model-specific and may need adjustment
+        assistant_start = None
+        
+        # Look for common assistant response patterns
+        for i in range(len(input_ids) - 1):
+            # This is a heuristic - adjust based on your specific model's tokenization
+            if input_ids[i] == 1:  # Common assistant start token
+                assistant_start = i + 1
+                break
+        
+        if assistant_start is None:
+            # Fallback: assume the last 40% is the assistant response
+            assistant_start = int(len(input_ids) * 0.6)
+        
+        # Set labels to -100 for user input (before assistant response)
+        labels[:assistant_start] = -100
+        
+        # Debug: check for NaN values
+        if torch.isnan(inputs['input_ids']).any():
+            logger.warning(f"NaN detected in input_ids for sample {idx}")
+        if torch.isnan(inputs['pixel_values']).any():
+            logger.warning(f"NaN detected in pixel_values for sample {idx}")
+        
         return {
             'input_ids': inputs['input_ids'].squeeze(0),
             'attention_mask': inputs['attention_mask'].squeeze(0),
             'pixel_values': inputs['pixel_values'].squeeze(0),
-            'labels': torch.tensor(label, dtype=torch.long)
+            'labels': labels  # Use the proper labels for VLM training
         }
 
 def extract_class_from_response(response: str, class_names: List[str]) -> Optional[str]:
@@ -485,14 +517,14 @@ def main():
         
         # Set appropriate dtype and device_map based on device
         if args.device == 'cpu':
-            model = AutoModelForVision2Seq.from_pretrained(
+            model = AutoModelForImageTextToText.from_pretrained(
                 args.model,
                 torch_dtype=torch.float32,
                 device_map=None
             )
         elif args.device == 'mps':
             # Use MPS with float32 (MPS doesn't support float16 well)
-            model = AutoModelForVision2Seq.from_pretrained(
+            model = AutoModelForImageTextToText.from_pretrained(
                 args.model,
                 torch_dtype=torch.float32,
                 device_map=None  # We'll move to MPS manually
@@ -501,11 +533,16 @@ def main():
             model = model.to('mps')
         else:
             # Use CUDA with appropriate dtype
-            model = AutoModelForVision2Seq.from_pretrained(
+            model = AutoModelForImageTextToText.from_pretrained(
                 args.model,
                 torch_dtype=torch.float16,  # Use float16 for GPU efficiency
                 device_map="auto"  # Let the model handle device placement
             )
+        
+        # Log model configuration
+        logger.info(f"Model config: {model.config}")
+        logger.info(f"Model has loss function: {hasattr(model, 'compute_loss')}")
+        
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         return
@@ -522,6 +559,19 @@ def main():
         class_names, image_column=image_column, label_column=label_column,
         max_length=config['max_length']
     )
+    
+    # Test model with a single sample to ensure it works
+    logger.info("Testing model with a single sample...")
+    test_sample = train_dataset[0]
+    with torch.no_grad():
+        test_outputs = model(
+            input_ids=test_sample['input_ids'].unsqueeze(0),
+            attention_mask=test_sample['attention_mask'].unsqueeze(0),
+            pixel_values=test_sample['pixel_values'].unsqueeze(0),
+            labels=test_sample['labels'].unsqueeze(0)
+        )
+        logger.info(f"Test loss: {test_outputs.loss}")
+        logger.info(f"Test loss type: {type(test_outputs.loss)}")
     
     # Handle validation split
     val_dataset = None
@@ -626,17 +676,54 @@ def main():
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
         
         for batch in progress_bar:
-            # Forward pass
+            # Forward pass - labels are now properly created in the dataset
+            input_ids = batch['input_ids']
+            attention_mask = batch['attention_mask']
+            pixel_values = batch['pixel_values']
+            labels = batch['labels']
+            
+            # Check for NaN values in inputs
+            if torch.isnan(input_ids).any() or torch.isnan(pixel_values).any():
+                logger.warning(f"NaN detected in inputs at step {global_step}")
+                continue
+                
             outputs = model(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask'],
-                pixel_values=batch['pixel_values'],
-                labels=batch['input_ids']  # For language modeling loss
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                labels=labels
             )
             loss = outputs.loss
             
+            # Debug: log loss type and value
+            if global_step % 100 == 0:
+                logger.info(f"Step {global_step} - Loss type: {type(loss)} - Loss value: {loss}")
+                logger.info(f"Labels contains -100: {(labels == -100).any()}")
+                logger.info(f"Labels valid tokens: {(labels != -100).sum()}")
+            
+            # Check for NaN loss
+            if torch.isnan(loss):
+                logger.warning(f"NaN loss detected at step {global_step}")
+                logger.warning(f"Loss value: {loss}")
+                logger.warning(f"Input shape: {input_ids.shape}")
+                logger.warning(f"Labels shape: {labels.shape}")
+                logger.warning(f"Labels min/max: {labels.min()}/{labels.max()}")
+                logger.warning(f"Labels contains -100: {(labels == -100).any()}")
+                logger.warning(f"Labels valid tokens: {(labels != -100).sum()}")
+                continue
+            
+            # Check for infinite loss
+            if torch.isinf(loss):
+                logger.warning(f"Infinite loss detected at step {global_step}")
+                continue
+            
             # Backward pass
             accelerator.backward(loss)
+            
+            # Gradient clipping for stability
+            if accelerator.sync_gradients:
+                accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
