@@ -447,9 +447,9 @@ def main():
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of epochs')
-    parser.add_argument('--learning_rate', type=float, default=5e-6, help='Learning rate (lowered for stability)')
+    parser.add_argument('--learning_rate', type=float, default=1e-6, help='Learning rate (lowered for gradient stability)')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
-    parser.add_argument('--warmup_ratio', type=float, default=0.1, help='Warmup ratio')
+    parser.add_argument('--warmup_ratio', type=float, default=0.2, help='Warmup ratio (increased for stability)')
     
     # System arguments
     parser.add_argument('--output_dir', type=str, default='./vlm_results', 
@@ -611,6 +611,15 @@ def main():
     logger.info(f"Task: {args.task_description}")
     logger.info(f"Classes ({num_classes}): {class_names}")
     
+    # Log training stability recommendations
+    logger.info("=" * 60)
+    logger.info("TRAINING STABILITY SETTINGS:")
+    logger.info(f"  Learning Rate: {args.learning_rate} (recommended: 1e-6 to 5e-7 for stability)")
+    logger.info(f"  Warmup Ratio: {args.warmup_ratio} (recommended: 0.2+ for VLM fine-tuning)")
+    logger.info(f"  Batch Size: {args.batch_size} (smaller batches = more stable)")
+    logger.info(f"  Gradient Clipping: 0.5 → 1.0 (aggressive → relaxed)")
+    logger.info("=" * 60)
+    
     # Create datasets
     config = VLM_CONFIGS[args.model]
     
@@ -708,11 +717,54 @@ def main():
     
     logger.info(f"Training steps: {total_steps}, Warmup: {warmup_steps}")
     
+    # Data sanity check - inspect a sample batch before training
+    logger.info("Performing data sanity check...")
+    sample_batch = next(iter(train_dataloader))
+    
+    # Decode and inspect the first sample
+    sample_input_ids = sample_batch['input_ids'][0]
+    sample_labels = sample_batch['labels'][0]
+    
+    # Decode the full conversation
+    decoded_conversation = processor.decode(sample_input_ids, skip_special_tokens=False)
+    logger.info("=" * 60)
+    logger.info("SAMPLE CONVERSATION:")
+    logger.info("=" * 60)
+    logger.info(decoded_conversation)
+    logger.info("=" * 60)
+    
+    # Analyze label masking
+    user_tokens = (sample_labels == -100).sum().item()
+    assistant_tokens = (sample_labels != -100).sum().item()
+    total_tokens = len(sample_labels)
+    
+    logger.info(f"Label Analysis:")
+    logger.info(f"  Total tokens: {total_tokens}")
+    logger.info(f"  User tokens (masked with -100): {user_tokens} ({user_tokens/total_tokens*100:.1f}%)")
+    logger.info(f"  Assistant tokens (to predict): {assistant_tokens} ({assistant_tokens/total_tokens*100:.1f}%)")
+    
+    # Check for potential issues
+    if assistant_tokens == 0:
+        logger.error("ERROR: No assistant tokens to predict! All labels are -100.")
+        logger.error("This will cause training instability. Check label creation logic.")
+        return
+    elif assistant_tokens < 5:
+        logger.warning(f"WARNING: Very few assistant tokens ({assistant_tokens}). This may cause instability.")
+    elif user_tokens == 0:
+        logger.warning("WARNING: No user tokens masked. The model will try to predict the entire sequence.")
+    
+    logger.info("Data sanity check completed.")
+    logger.info("=" * 60)
+    
     # Training loop
     train_losses = []
     val_accuracies = []
     best_val_accuracy = 0
     global_step = 0
+    
+    # Gradient stability tracking
+    high_gradient_count = 0
+    gradient_history = []
     
     model.train()
     
@@ -802,14 +854,46 @@ def main():
                 max_norm = 0.5 if global_step < 100 else 1.0
                 grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=max_norm)
                 
-                # Log gradient norm for first few steps
-                if global_step < 10 or global_step % 100 == 0:
-                    logger.info(f"Step {global_step} - Gradient norm: {grad_norm:.4f} (clipped to {max_norm})")
+                # Track gradient stability
+                clipping_ratio = grad_norm / max_norm if max_norm > 0 else 0
+                gradient_history.append(clipping_ratio)
+                
+                # Count consecutive high gradient steps
+                if clipping_ratio > 20:
+                    high_gradient_count += 1
+                else:
+                    high_gradient_count = 0
+                
+                # Enhanced gradient monitoring
+                if global_step < 20 or global_step % 50 == 0:
+                    logger.info(f"Step {global_step} - Gradient norm: {grad_norm:.4f} (clipped to {max_norm}) - "
+                              f"Clipping ratio: {clipping_ratio:.1f}x")
+                    
+                    # Provide guidance based on gradient behavior
+                    if clipping_ratio > 50:
+                        logger.warning(f"Extreme gradient clipping ({clipping_ratio:.1f}x)! Consider:")
+                        logger.warning("  • Further reducing learning rate (try 5e-7 or 1e-7)")
+                        logger.warning("  • Increasing warmup steps")
+                        logger.warning("  • Checking data for anomalies")
+                    elif clipping_ratio > 10:
+                        logger.warning(f"High gradient clipping ({clipping_ratio:.1f}x). Training may be unstable.")
+                    elif clipping_ratio < 1.5 and global_step > 100:
+                        logger.info(f"Gradients are well-behaved ({clipping_ratio:.1f}x). Training is stable.")
+                
+                # Early warning system for persistent instability
+                if high_gradient_count >= 50:
+                    logger.error(f"Training has been unstable for {high_gradient_count} consecutive steps!")
+                    logger.error("This indicates the learning rate is still too high or there are data issues.")
+                    logger.error("Consider stopping training and:")
+                    logger.error("  • Reducing learning rate by another order of magnitude")
+                    logger.error("  • Increasing warmup ratio to 0.3 or higher")
+                    logger.error("  • Checking for data preprocessing issues")
+                    # Don't automatically stop, but give strong warning
+                elif high_gradient_count >= 20 and global_step % 10 == 0:
+                    logger.warning(f"Training unstable for {high_gradient_count} steps. Monitor closely.")
                 
                 # Check for problematic gradients
-                if grad_norm > 10.0:
-                    logger.warning(f"Large gradient norm detected: {grad_norm:.4f} at step {global_step}")
-                elif torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
                     logger.error(f"Invalid gradient norm: {grad_norm} at step {global_step}")
                     continue
             
