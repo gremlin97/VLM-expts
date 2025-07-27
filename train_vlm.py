@@ -11,6 +11,9 @@ import logging
 from typing import Dict, List, Optional, Union
 import re
 
+# Set environment variable to avoid tokenizer parallelism issues
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -55,6 +58,49 @@ VLM_CONFIGS = {
         'description': 'Qwen2-VL (2B params) - excellent for complex reasoning'
     }
 }
+
+def vlm_collate_fn(batch):
+    """Custom collate function to handle variable-length sequences."""
+    # Separate different types of data
+    input_ids = [item['input_ids'] for item in batch]
+    attention_masks = [item['attention_mask'] for item in batch]
+    pixel_values = [item['pixel_values'] for item in batch]
+    labels = [item['labels'] for item in batch]
+    
+    # Debug: print tensor sizes
+    if len(input_ids) > 0:
+        logger.debug(f"Batch sizes: {[len(ids) for ids in input_ids]}")
+    
+    # Pad input_ids and attention_masks to the same length
+    max_length = max(len(ids) for ids in input_ids)
+    
+    padded_input_ids = []
+    padded_attention_masks = []
+    
+    for ids, mask in zip(input_ids, attention_masks):
+        # Ensure we have the right data types
+        ids = ids.to(torch.long)
+        mask = mask.to(torch.long)
+        
+        # Pad to max_length
+        padding_length = max_length - len(ids)
+        if padding_length > 0:
+            padded_ids = torch.cat([ids, torch.zeros(padding_length, dtype=torch.long)])
+            padded_mask = torch.cat([mask, torch.zeros(padding_length, dtype=torch.long)])
+        else:
+            padded_ids = ids
+            padded_mask = mask
+        
+        padded_input_ids.append(padded_ids)
+        padded_attention_masks.append(padded_mask)
+    
+    # Stack all tensors
+    return {
+        'input_ids': torch.stack(padded_input_ids),
+        'attention_mask': torch.stack(padded_attention_masks),
+        'pixel_values': torch.stack(pixel_values),
+        'labels': torch.stack(labels)
+    }
 
 class VLMDataset(torch.utils.data.Dataset):
     """Generic VLM dataset for any image classification task with custom prompts."""
@@ -396,8 +442,8 @@ def main():
         processor = AutoProcessor.from_pretrained(args.model)
         model = AutoModelForVision2Seq.from_pretrained(
             args.model,
-            torch_dtype=torch.bfloat16,
-            device_map="auto" if torch.cuda.is_available() else None
+            torch_dtype=torch.float32,  # Use float32 for CPU
+            device_map=None  # Force CPU usage
         )
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
@@ -459,16 +505,16 @@ def main():
     # Create dataloaders
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, 
-        num_workers=2, pin_memory=True
+        num_workers=0, pin_memory=False, collate_fn=vlm_collate_fn
     )
     val_dataloader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=2, pin_memory=True
+        num_workers=0, pin_memory=False, collate_fn=vlm_collate_fn
     ) if val_dataset else None
     
     test_dataloader = DataLoader(
         test_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=2, pin_memory=True
+        num_workers=0, pin_memory=False, collate_fn=vlm_collate_fn
     ) if test_dataset else None
     
     # Setup training

@@ -8,7 +8,7 @@ set -e
 # Default parameters
 MODEL="HuggingFaceTB/SmolVLM-500M-Instruct"
 DATASET="Mirali33/mb-domars16k"
-BATCH_SIZE=4
+BATCH_SIZE=1
 EPOCHS=3
 LEARNING_RATE=1e-5
 OUTPUT_DIR="./vlm_results"
@@ -17,6 +17,7 @@ MAX_SAMPLES=""
 TASK_DESCRIPTION="image classification"
 SYSTEM_INSTRUCTIONS=""
 PROMPT_TEMPLATE=""
+CLASS_NAMES=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -57,6 +58,10 @@ while [[ $# -gt 0 ]]; do
             PROMPT_TEMPLATE="$2"
             shift 2
             ;;
+        --class-names)
+            CLASS_NAMES="$2"
+            shift 2
+            ;;
         --use-wandb)
             USE_WANDB=true
             shift
@@ -77,6 +82,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --task-description DESC         Task description (default: image classification)"
             echo "  --system-instructions TEXT      Custom system instructions"
             echo "  --prompt-template TEXT          Custom prompt template"
+            echo "  --class-names NAMES             Custom class names (space-separated)"
             echo "  --use-wandb                     Enable Weights & Biases logging"
             echo "  --max-samples N                 Limit samples for testing"
             echo "  --help                          Show this help message"
@@ -133,6 +139,11 @@ if [ -n "$PROMPT_TEMPLATE" ]; then
     CMD="$CMD --prompt_template \"$PROMPT_TEMPLATE\""
 fi
 
+if [ -n "$CLASS_NAMES" ]; then
+    # Pass class names as a single argument with multiple values
+    CMD="$CMD --class_names $CLASS_NAMES"
+fi
+
 # Print configuration
 echo "=== VLM Training Configuration ==="
 echo "Model: $MODEL"
@@ -151,6 +162,9 @@ if [ -n "$SYSTEM_INSTRUCTIONS" ]; then
 fi
 if [ -n "$PROMPT_TEMPLATE" ]; then
     echo "Custom Prompt Template: Yes"
+fi
+if [ -n "$CLASS_NAMES" ]; then
+    echo "Class Names: Yes"
 fi
 echo "================================"
 
