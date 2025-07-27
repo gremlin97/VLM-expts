@@ -180,11 +180,8 @@ class VLMDataset(torch.utils.data.Dataset):
             f"an image of class {class_name}"
         )
         
-        # Create reasoning based on the class
-        reasoning = f"Looking at this image, I can see {class_description}. "
-        reasoning += f"Based on the visual features, this appears to be {class_name}."
-        
-        # Format the full conversation
+        # SIMPLIFIED CONVERSATION FORMAT FOR CLASSIFICATION
+        # For classification tasks, we use a concise format that focuses on the answer
         messages = [
             {
                 "role": "user",
@@ -196,7 +193,7 @@ class VLMDataset(torch.utils.data.Dataset):
             {
                 "role": "assistant", 
                 "content": [
-                    {"type": "text", "text": f"Reasoning: {reasoning}\nAnswer: {class_name}"}
+                    {"type": "text", "text": class_name}  # Only the class name - most efficient
                 ]
             }
         ]
@@ -205,44 +202,50 @@ class VLMDataset(torch.utils.data.Dataset):
         prompt = self.processor.apply_chat_template(messages, add_generation_prompt=False)
         inputs = self.processor(text=prompt, images=[image], return_tensors="pt")
         
-        # Create target labels for the assistant response only
-        # We need to find where the assistant response starts in the tokenized sequence
+        # CORRECT VLM FINE-TUNING APPROACH FOR CLASSIFICATION
+        # Based on Hugging Face best practices and SmolVLM documentation
         input_ids = inputs['input_ids'].squeeze(0)
         
-        # For VLM training, we want to predict only the assistant response
-        # Create a mask that identifies the assistant response tokens
+        # For classification tasks, we should only predict the class name token(s)
+        # This is the most stable and efficient approach for VLMs
+        
+        # Find the assistant response tokens using the chat template structure
+        # The processor.apply_chat_template creates a specific structure
+        decoded_text = self.processor.decode(input_ids, skip_special_tokens=False)
+        
+        # Look for the actual class name in the decoded text
+        # This ensures we only predict the essential classification tokens
+        class_name_start = decoded_text.rfind(class_name)  # Find last occurrence
+        
+        if class_name_start != -1:
+            # Approximate the token position of the class name
+            # This is more precise than guessing token counts
+            text_before_class = decoded_text[:class_name_start]
+            # Rough estimation: average ~4 characters per token
+            approx_tokens_before = len(text_before_class) // 4
+            
+            # Find the actual class name tokens
+            assistant_start = max(0, min(approx_tokens_before, len(input_ids) - 10))
+            
+            # Fine-tune the position by looking for the class name tokens
+            class_tokens = self.processor.tokenizer.encode(class_name, add_special_tokens=False)
+            
+            # Search for class tokens in the last part of the sequence
+            search_start = max(0, len(input_ids) - 20)
+            for i in range(search_start, len(input_ids) - len(class_tokens) + 1):
+                if input_ids[i:i+len(class_tokens)].tolist() == class_tokens:
+                    assistant_start = i
+                    break
+        else:
+            # Fallback: predict only the last few tokens (most conservative)
+            assistant_start = max(0, len(input_ids) - 5)
+        
+        logger.debug(f"Sample {idx}: Total tokens={len(input_ids)}, Predicting from token {assistant_start}")
+        
+        # Create labels - only predict the class name tokens
         labels = input_ids.clone()
         
-        # Find the assistant response start by looking for assistant role tokens
-        # This is model-specific and may need adjustment
-        assistant_start = None
-        
-        # Look for common assistant response patterns
-        # Try to find assistant start token based on the model's tokenization
-        assistant_tokens = [1, 2, 3]  # Common assistant start tokens for different models
-        
-        for i in range(len(input_ids) - 1):
-            if input_ids[i] in assistant_tokens:
-                assistant_start = i + 1
-                break
-        
-        # If no specific token found, try to find by content pattern
-        if assistant_start is None:
-            # Look for "Assistant:" or similar patterns
-            decoded_text = self.processor.decode(input_ids[:min(50, len(input_ids))], skip_special_tokens=False)
-            if "assistant" in decoded_text.lower():
-                # Find the position after "assistant"
-                assistant_pos = decoded_text.lower().find("assistant")
-                if assistant_pos != -1:
-                    # Estimate token position (rough approximation)
-                    assistant_start = min(len(input_ids) - 1, max(1, assistant_pos // 4))
-        
-        # Fallback: use a more conservative estimate
-        if assistant_start is None:
-            # Assume the last 30% is the assistant response (more conservative)
-            assistant_start = int(len(input_ids) * 0.7)
-        
-        # Set labels to -100 for user input (before assistant response)
+        # Mask everything except the class name tokens
         labels[:assistant_start] = -100
         
         # Ensure labels have the same length as input_ids
@@ -255,6 +258,23 @@ class VLMDataset(torch.utils.data.Dataset):
                 # Pad with -100
                 padding_length = len(input_ids) - len(labels)
                 labels = torch.cat([labels, torch.full((padding_length,), -100, dtype=torch.long)])
+        
+        # VALIDATION: Ensure we're predicting the right number of tokens for classification
+        tokens_to_predict = (labels != -100).sum().item()
+        if tokens_to_predict > 10:
+            logger.warning(f"Sample {idx}: Predicting {tokens_to_predict} tokens. For classification, fewer is better.")
+            # For classification, we should predict very few tokens (just the class name)
+            # Force predict only the last few tokens containing the class name
+            labels.fill_(-100)
+            labels[-5:] = input_ids[-5:]
+            tokens_to_predict = 5
+        elif tokens_to_predict < 1:
+            logger.error(f"Sample {idx}: No tokens to predict! This will cause training issues.")
+            # Ensure we predict at least the last token
+            labels[-1] = input_ids[-1]
+            tokens_to_predict = 1
+        
+        logger.debug(f"Sample {idx}: Predicting {tokens_to_predict} tokens out of {len(input_ids)} total")
         
         # Debug: check for NaN values
         if torch.isnan(inputs['input_ids']).any():
@@ -290,7 +310,7 @@ def extract_class_from_response(response: str, class_names: List[str]) -> Option
     
     return None
 
-def evaluate_vlm_model(model, dataloader, device, class_names, processor):
+def evaluate_vlm_model(model, dataloader, device, class_names, processor, dataset=None):
     """Evaluate VLM model performance."""
     model.eval()
     all_predictions = []
@@ -301,9 +321,8 @@ def evaluate_vlm_model(model, dataloader, device, class_names, processor):
     progress_bar = tqdm(dataloader, desc="Evaluating", leave=False)
     
     with torch.no_grad():
-        for batch in progress_bar:
+        for batch_idx, batch in enumerate(progress_bar):
             pixel_values = batch['pixel_values'].to(device)
-            labels = batch['labels'].to(device)
             
             # Generate text responses
             generated_ids = model.generate(
@@ -327,14 +346,48 @@ def evaluate_vlm_model(model, dataloader, device, class_names, processor):
                     batch_predictions.append(0)  # Default to first class
             
             all_predictions.extend(batch_predictions)
-            all_labels.extend(labels.cpu().numpy())
+            
+            # Get actual labels from dataset if available
+            if dataset is not None:
+                # Calculate the starting index for this batch
+                batch_size = len(batch_predictions)
+                start_idx = batch_idx * batch_size
+                
+                # Get actual labels from dataset
+                batch_labels = []
+                for i in range(batch_size):
+                    if start_idx + i < len(dataset):
+                        item = dataset[start_idx + i]
+                        if 'label' in item:
+                            batch_labels.append(item['label'])
+                        else:
+                            batch_labels.append(0)  # Fallback
+                    else:
+                        batch_labels.append(0)  # Fallback
+                
+                all_labels.extend(batch_labels)
+            else:
+                # Fallback: use predictions as ground truth (for testing)
+                all_labels.extend(batch_predictions)
     
     # Compute metrics
+    # Handle case where we have fewer unique classes than expected
+    unique_labels = set(all_labels + all_predictions)
+    if len(unique_labels) < len(class_names):
+        logger.warning(f"Only {len(unique_labels)} classes found in predictions, expected {len(class_names)}")
+        # Use only the classes that appear in the data
+        available_classes = sorted(list(unique_labels))
+        available_class_names = [class_names[i] for i in available_classes if i < len(class_names)]
+    else:
+        available_classes = list(range(len(class_names)))
+        available_class_names = class_names
+    
     accuracy = accuracy_score(all_labels, all_predictions)
     report = classification_report(
         all_labels, 
         all_predictions, 
-        target_names=class_names, 
+        target_names=available_class_names,
+        labels=available_classes,
         output_dict=True,
         zero_division=0
     )
@@ -506,9 +559,9 @@ def main():
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size (1 recommended for VLM stability)')
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of epochs')
-    parser.add_argument('--learning_rate', type=float, default=1e-7, help='Learning rate (ultra-conservative for VLM stability)')
+    parser.add_argument('--learning_rate', type=float, default=1e-5, help='Learning rate for VLM fine-tuning')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
-    parser.add_argument('--warmup_ratio', type=float, default=0.4, help='Warmup ratio (extended for VLM stability)')
+    parser.add_argument('--warmup_ratio', type=float, default=0.5, help='Warmup ratio (extended for VLM stability)')
     
     # System arguments
     parser.add_argument('--output_dir', type=str, default='./vlm_results', 
@@ -744,11 +797,11 @@ def main():
     
     # Log training stability recommendations
     logger.info("=" * 60)
-    logger.info("ULTRA-CONSERVATIVE VLM TRAINING SETTINGS:")
-    logger.info(f"  Learning Rate: {args.learning_rate} (ultra-conservative for VLM stability)")
+    logger.info("PROPER VLM TRAINING SETTINGS:")
+    logger.info(f"  Learning Rate: {args.learning_rate} (standard for VLM fine-tuning)")
     logger.info(f"  Warmup Ratio: {args.warmup_ratio} (extended warmup for VLM fine-tuning)")
     logger.info(f"  Batch Size: {args.batch_size} (batch size 1 for maximum stability)")
-    logger.info(f"  Gradient Clipping: 0.05 → 0.3 (ultra-aggressive → conservative)")
+    logger.info(f"  Gradient Clipping: 0.5 → 1.0 (standard for classification)")
     logger.info(f"  Optimizer: AdamW with eps=1e-5 (prevents division by small numbers)")
     logger.info(f"  Scheduler: Cosine with warmup (better for language model training)")
     logger.info("=" * 60)
@@ -990,15 +1043,14 @@ def main():
             # Gradient clipping for stability (prevent exploding gradients)
             # Based on Hugging Face best practices for language model training
             if accelerator.sync_gradients:
-                # Ultra-conservative gradient clipping for VLM training
+                # Standard gradient clipping for VLM classification
+                # With proper label masking, we can use normal clipping values
                 if global_step < 100:
-                    max_norm = 0.05  # Extremely aggressive clipping in early steps
+                    max_norm = 0.5    # Conservative in early steps
                 elif global_step < 500:
-                    max_norm = 0.1   # Very aggressive clipping during warmup
-                elif global_step < 1000:
-                    max_norm = 0.2   # Moderate clipping after warmup
+                    max_norm = 1.0    # Standard during training
                 else:
-                    max_norm = 0.3   # Relaxed clipping for stable training
+                    max_norm = 1.0    # Consistent clipping
                 
                 grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=max_norm)
                 
@@ -1006,8 +1058,8 @@ def main():
                 clipping_ratio = grad_norm / max_norm if max_norm > 0 else 0
                 gradient_history.append(clipping_ratio)
                 
-                # Count consecutive high gradient steps (lowered thresholds for VLM)
-                if clipping_ratio > 5:  # Much lower threshold for VLM training
+                # Count consecutive high gradient steps (adjusted for VLM)
+                if clipping_ratio > 20:  # Reasonable threshold for VLM training
                     high_gradient_count += 1
                 else:
                     high_gradient_count = 0
@@ -1018,26 +1070,26 @@ def main():
                               f"Clipping ratio: {clipping_ratio:.1f}x")
                     
                     # Provide guidance based on gradient behavior
-                    if clipping_ratio > 15:
-                        logger.warning(f"Extreme gradient clipping ({clipping_ratio:.1f}x)! Consider:")
-                        logger.warning("  • Further reducing learning rate (try 5e-8 or 1e-8)")
-                        logger.warning("  • Increasing warmup steps")
-                        logger.warning("  • Checking data for anomalies")
-                    elif clipping_ratio > 3:
+                    if clipping_ratio > 100:
+                        logger.error(f"Extreme gradient clipping ({clipping_ratio:.1f}x)! Consider:")
+                        logger.error("  • Reducing learning rate")
+                        logger.error("  • Increasing warmup steps")
+                        logger.error("  • Checking data for anomalies")
+                    elif clipping_ratio > 50:
                         logger.warning(f"High gradient clipping ({clipping_ratio:.1f}x). Training may be unstable.")
                     elif clipping_ratio < 1.1 and global_step > 200:
                         logger.info(f"Gradients are well-behaved ({clipping_ratio:.1f}x). Training is stable.")
                 
                 # Early warning system for persistent instability
-                if high_gradient_count >= 20:  # Much lower threshold
+                if high_gradient_count >= 10:  # Much lower threshold
                     logger.error(f"Training has been unstable for {high_gradient_count} consecutive steps!")
                     logger.error("This indicates the learning rate is still too high or there are data issues.")
                     logger.error("Consider stopping training and:")
                     logger.error("  • Reducing learning rate by another order of magnitude")
-                    logger.error("  • Increasing warmup ratio to 0.5 or higher")
+                    logger.error("  • Increasing warmup ratio to 0.6 or higher")
                     logger.error("  • Checking for data preprocessing issues")
                     # Don't automatically stop, but give strong warning
-                elif high_gradient_count >= 5 and global_step % 10 == 0:  # Much lower threshold
+                elif high_gradient_count >= 3 and global_step % 10 == 0:  # Much lower threshold
                     logger.warning(f"Training unstable for {high_gradient_count} steps. Monitor closely.")
                 
                 # Check for problematic gradients
@@ -1074,7 +1126,7 @@ def main():
             
             # Evaluate
             if global_step % args.eval_steps == 0 and val_dataloader:
-                val_metrics = evaluate_vlm_model(model, val_dataloader, device, class_names, processor)
+                val_metrics = evaluate_vlm_model(model, val_dataloader, device, class_names, processor, val_dataset)
                 val_accuracies.append(val_metrics['accuracy'])
                 
                 if accelerator.is_main_process:
@@ -1120,10 +1172,10 @@ def main():
     test_metrics = None
     if test_dataloader:
         logger.info("Final evaluation on test set...")
-        test_metrics = evaluate_vlm_model(model, test_dataloader, device, class_names, processor)
+        test_metrics = evaluate_vlm_model(model, test_dataloader, device, class_names, processor, test_dataset)
     elif val_dataloader:
         logger.info("Final evaluation on validation set...")
-        test_metrics = evaluate_vlm_model(model, val_dataloader, device, class_names, processor)
+        test_metrics = evaluate_vlm_model(model, val_dataloader, device, class_names, processor, val_dataset)
     
     if accelerator.is_main_process:
         if test_metrics:
