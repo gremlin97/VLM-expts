@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-REVOLUTIONARY VLM Image Classification - Next-Generation VLM Approach
-Uses modern VLM optimization techniques for maximum speed and accuracy.
-Stays true to VLM architecture while implementing cutting-edge optimizations.
+VLM Image Classification - Efficient Fine-tuning Approach
+Uses modern VLM optimization techniques for classification tasks.
+Implements HuggingFace best practices for VLM fine-tuning.
 """
 
 import os
@@ -37,32 +37,32 @@ import wandb
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# REVOLUTIONARY VLM CONFIGS - Next-Generation VLM Models
-REVOLUTIONARY_VLM_CONFIGS = {
+# VLM Model Configurations
+VLM_CONFIGS = {
     'HuggingFaceTB/SmolVLM-256M-Instruct': {
         'max_length': 1200,  # Sufficient for image tokens + efficient text
-        'description': 'SmolVLM-256M - Revolutionary optimization for classification',
+        'description': 'SmolVLM-256M - Efficient classification model',
         'memory_requirement': 'low',
-        'optimization_level': 'maximum'
+        'optimization_level': 'high'
     },
     'HuggingFaceTB/SmolVLM-500M-Instruct': {
         'max_length': 1400,  # Optimized length with room for images
-        'description': 'SmolVLM-500M - Balanced performance with revolutionary speed',
+        'description': 'SmolVLM-500M - Balanced performance and speed',
         'memory_requirement': 'medium',
         'optimization_level': 'high'
     },
     'microsoft/Phi-3.5-vision-instruct': {
         'max_length': 1600,  # Efficient for Phi-3.5 with image support
-        'description': 'Phi-3.5 Vision - Enterprise-grade revolutionary VLM',
+        'description': 'Phi-3.5 Vision - Enterprise-grade VLM',
         'memory_requirement': 'high',
         'optimization_level': 'high'
     }
 }
 
-class RevolutionaryVLMClassifier(nn.Module):
+class VLMClassifier(nn.Module):
     """
-    Revolutionary VLM Classifier with next-generation optimizations.
-    Maintains VLM architecture while implementing cutting-edge efficiency techniques.
+    VLM Classifier with efficient fine-tuning approach.
+    Maintains VLM architecture while implementing optimized training.
     """
     
     def __init__(self, base_vlm_model, num_classes: int, class_names: List[str]):
@@ -80,7 +80,7 @@ class RevolutionaryVLMClassifier(nn.Module):
         else:
             self.hidden_dim = 768  # Fallback
         
-        # Revolutionary classification head - optimized for VLM features
+        # Classification head - optimized for VLM features
         self.classification_head = nn.Sequential(
             nn.LayerNorm(self.hidden_dim),
             nn.Dropout(0.1),
@@ -108,7 +108,7 @@ class RevolutionaryVLMClassifier(nn.Module):
                     for param in layer.parameters():
                         param.requires_grad = True
         
-        logger.info("🔥 Frozen base VLM model - only training last layers + classification head")
+        logger.info("Base VLM model frozen - training only last layers and classification head")
     
     def _init_classification_head(self):
         """Initialize classification head with proper scaling."""
@@ -120,11 +120,11 @@ class RevolutionaryVLMClassifier(nn.Module):
     
     def forward(self, input_ids, attention_mask, pixel_values, labels=None):
         """
-        Revolutionary forward pass - VLM features + direct classification.
+        Forward pass - VLM features + direct classification.
         Maintains VLM architecture while optimizing for classification.
         """
         # Get VLM features with efficient computation
-        with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+        with torch.amp.autocast('cuda' if torch.cuda.is_available() else 'cpu'):
             vlm_outputs = self.base_vlm_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -136,7 +136,7 @@ class RevolutionaryVLMClassifier(nn.Module):
         # Extract features from the last hidden state
         last_hidden_state = vlm_outputs.hidden_states[-1]  # [batch, seq_len, hidden_dim]
         
-        # Revolutionary pooling strategy - focus on the last meaningful tokens
+        # Pooling strategy - focus on the last meaningful tokens
         # Use attention mask to find the last non-padded token for each sequence
         batch_size, seq_len, hidden_dim = last_hidden_state.shape
         
@@ -148,7 +148,7 @@ class RevolutionaryVLMClassifier(nn.Module):
         batch_indices = torch.arange(batch_size, device=last_hidden_state.device)
         pooled_features = last_hidden_state[batch_indices, last_positions]  # [batch_size, hidden_dim]
         
-        # Direct classification through revolutionary head
+        # Direct classification through head
         logits = self.classification_head(pooled_features)
         
         # Compute loss if labels provided
@@ -163,9 +163,9 @@ class RevolutionaryVLMClassifier(nn.Module):
             'hidden_states': pooled_features
         }
 
-class RevolutionaryVLMDataset(torch.utils.data.Dataset):
+class VLMDataset(torch.utils.data.Dataset):
     """
-    Revolutionary VLM dataset with ultra-efficient processing.
+    VLM dataset with efficient processing.
     Optimized prompts and tokenization for maximum speed.
     """
     
@@ -178,7 +178,7 @@ class RevolutionaryVLMDataset(torch.utils.data.Dataset):
         self.label_column = label_column
         self.max_length = max_length
         
-        # Revolutionary prompt template - ultra-concise for speed
+        # Efficient prompt template - concise for speed
         self.prompt_template = "Classify:"
         
     def __len__(self):
@@ -196,7 +196,7 @@ class RevolutionaryVLMDataset(torch.utils.data.Dataset):
         # Get class name
         class_name = self.class_names[label]
         
-        # REVOLUTIONARY ULTRA-EFFICIENT CONVERSATION FORMAT
+        # Efficient conversation format
         # Minimal tokens for maximum speed while maintaining VLM structure
         messages = [
             {
@@ -214,20 +214,20 @@ class RevolutionaryVLMDataset(torch.utils.data.Dataset):
             }
         ]
         
-        # Apply chat template with revolutionary efficiency
+        # Apply chat template with efficiency
         prompt = self.processor.apply_chat_template(messages, add_generation_prompt=False)
         
-        # REVOLUTIONARY PROCESSING - Optimized for speed and memory
+        # Processing - Optimized for speed and memory
         inputs = self.processor(
             text=prompt, 
             images=[image], 
             return_tensors="pt",
-            max_length=self.max_length,  # Ultra-short sequences
+            max_length=self.max_length,  # Efficient sequences
             truncation=True,
             padding=False  # Dynamic padding in collate_fn
         )
         
-        # REVOLUTIONARY LABEL STRATEGY - Predict only the class token
+        # Label strategy - Predict only the class tokens
         input_ids = inputs['input_ids'].squeeze(0)
         
         # Find the class name tokens efficiently
@@ -259,9 +259,9 @@ class RevolutionaryVLMDataset(torch.utils.data.Dataset):
             'class_label': torch.tensor(label, dtype=torch.long)  # For evaluation
         }
 
-def revolutionary_vlm_collate_fn(batch, processor=None):
+def vlm_collate_fn(batch, processor=None):
     """
-    Revolutionary collate function with XLA-optimized padding.
+    VLM collate function with XLA-optimized padding.
     Based on HuggingFace best practices for maximum efficiency.
     """
     # Extract components
@@ -271,7 +271,7 @@ def revolutionary_vlm_collate_fn(batch, processor=None):
     labels = [item['labels'] for item in batch]
     class_labels = [item['class_label'] for item in batch]
     
-    # REVOLUTIONARY PADDING STRATEGY - XLA optimized
+    # PADDING STRATEGY - XLA optimized
     # Pad to multiple of 32 for XLA efficiency (HuggingFace best practice)
     max_length = max(len(ids) for ids in input_ids)
     padded_length = ((max_length + 31) // 32) * 32  # Round up to multiple of 32
@@ -310,9 +310,9 @@ def revolutionary_vlm_collate_fn(batch, processor=None):
         'class_labels': torch.stack(class_labels)  # For evaluation
     }
 
-def evaluate_revolutionary_vlm(model, dataloader, device, class_names):
+def evaluate_vlm_model(model, dataloader, device, class_names):
     """
-    Revolutionary VLM evaluation with direct classification.
+    VLM evaluation with direct classification.
     """
     model.eval()
     all_predictions = []
@@ -452,13 +452,13 @@ def auto_detect_dataset_info(dataset, image_column: str = 'image', label_column:
     return detected_image_col, detected_label_col, class_names, num_classes
 
 def main():
-    parser = argparse.ArgumentParser(description='Revolutionary VLM Image Classification - Next-Generation VLM Approach')
+    parser = argparse.ArgumentParser(description='VLM Image Classification - Efficient Fine-tuning Approach')
     
     # Model and dataset arguments
     parser.add_argument('--model', type=str, 
-                      choices=list(REVOLUTIONARY_VLM_CONFIGS.keys()),
+                      choices=list(VLM_CONFIGS.keys()),
                       default='HuggingFaceTB/SmolVLM-256M-Instruct',
-                      help='Revolutionary VLM model with next-gen optimizations')
+                      help='VLM model for classification')
     parser.add_argument('--dataset', type=str, default='Mirali33/mb-domars16k',
                       help='HuggingFace dataset name or local path')
     parser.add_argument('--dataset_config', type=str, default=None,
@@ -474,15 +474,15 @@ def main():
     parser.add_argument('--class_names', type=str, nargs='*', default=None,
                       help='List of class names (auto-generated if not specified)')
     
-    # REVOLUTIONARY Training arguments - Next-generation optimization
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size (optimized for VLM efficiency)')
+    # Training arguments
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of epochs')
-    parser.add_argument('--learning_rate', type=float, default=5e-5, help='Learning rate (optimized for VLM fine-tuning)')
+    parser.add_argument('--learning_rate', type=float, default=5e-5, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
     parser.add_argument('--warmup_ratio', type=float, default=0.1, help='Warmup ratio')
     
     # System arguments
-    parser.add_argument('--output_dir', type=str, default='./revolutionary_vlm_results', 
+    parser.add_argument('--output_dir', type=str, default='./vlm_results', 
                       help='Output directory')
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases')
     parser.add_argument('--eval_steps', type=int, default=50, help='Evaluation frequency')
@@ -532,7 +532,7 @@ def main():
     logger.info(f"Using device: {device}")
     
     if args.use_wandb and accelerator.is_main_process:
-        wandb.init(project='revolutionary-vlm-classification', config=vars(args))
+        wandb.init(project='vlm-classification', config=vars(args))
     
     # Load dataset
     logger.info(f"Loading dataset: {args.dataset}")
@@ -541,7 +541,7 @@ def main():
             dataset = load_dataset(args.dataset, args.dataset_config)
         else:
             dataset = load_dataset(args.dataset)
-        logger.info(f"✓ Dataset loaded successfully!")
+        logger.info(f"Dataset loaded successfully!")
     except Exception as e:
         logger.error(f"Failed to load dataset: {e}")
         return
@@ -570,7 +570,7 @@ def main():
                 dataset[split] = dataset[split].select(range(args.max_samples))
     
     # Load VLM processor and model
-    logger.info(f"Loading Revolutionary VLM: {args.model}")
+    logger.info(f"Loading VLM: {args.model}")
     try:
         processor = AutoProcessor.from_pretrained(args.model)
         base_vlm_model = AutoModelForImageTextToText.from_pretrained(
@@ -578,32 +578,32 @@ def main():
             torch_dtype=torch.float32 if args.device == 'cpu' else torch.bfloat16,
             device_map=None
         )
-        logger.info("✓ Base VLM model loaded successfully!")
+        logger.info("Base VLM model loaded successfully!")
         
-        # Create revolutionary VLM classifier
-        model = RevolutionaryVLMClassifier(base_vlm_model, num_classes, class_names)
-        logger.info("✓ Revolutionary VLM Classifier created!")
+        # Create VLM classifier
+        model = VLMClassifier(base_vlm_model, num_classes, class_names)
+        logger.info("VLM Classifier created!")
         
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         return
     
     logger.info("=" * 60)
-    logger.info("🚀 REVOLUTIONARY VLM CLASSIFICATION APPROACH:")
-    logger.info(f"  Architecture: Next-generation VLM with efficiency optimizations")
+    logger.info("VLM CLASSIFICATION APPROACH:")
+    logger.info(f"  Architecture: VLM with parameter-efficient fine-tuning")
     logger.info(f"  Model: {args.model}")
     logger.info(f"  Classes: {num_classes}")
-    logger.info(f"  Max Length: {REVOLUTIONARY_VLM_CONFIGS[args.model]['max_length']} (ultra-optimized)")
-    logger.info(f"  Batch Size: {args.batch_size} (VLM-optimized)")
-    logger.info(f"  Learning Rate: {args.learning_rate} (VLM fine-tuning optimized)")
-    logger.info(f"  Approach: VLM + Direct Classification Head")
-    logger.info(f"  Optimizations: Frozen layers + XLA padding + Efficient tokenization")
+    logger.info(f"  Max Length: {VLM_CONFIGS[args.model]['max_length']}")
+    logger.info(f"  Batch Size: {args.batch_size}")
+    logger.info(f"  Learning Rate: {args.learning_rate}")
+    logger.info(f"  Approach: VLM with direct classification head")
+    logger.info(f"  Optimizations: Parameter-efficient training with XLA-optimized padding")
     logger.info("=" * 60)
     
     # Create datasets
-    config = REVOLUTIONARY_VLM_CONFIGS[args.model]
+    config = VLM_CONFIGS[args.model]
     
-    train_dataset = RevolutionaryVLMDataset(
+    train_dataset = VLMDataset(
         dataset[train_split], processor, class_names,
         image_column=image_column, label_column=label_column,
         max_length=config['max_length']
@@ -613,13 +613,13 @@ def main():
     val_dataset = None
     if 'val' in dataset or 'validation' in dataset:
         val_split = 'val' if 'val' in dataset else 'validation'
-        val_dataset = RevolutionaryVLMDataset(
+        val_dataset = VLMDataset(
             dataset[val_split], processor, class_names,
             image_column=image_column, label_column=label_column,
             max_length=config['max_length']
         )
     elif 'test' in dataset:
-        val_dataset = RevolutionaryVLMDataset(
+        val_dataset = VLMDataset(
             dataset['test'], processor, class_names,
             image_column=image_column, label_column=label_column,
             max_length=config['max_length']
@@ -627,12 +627,12 @@ def main():
     else:
         # Split training data
         train_val_split = dataset[train_split].train_test_split(test_size=args.val_split_ratio, seed=42)
-        train_dataset = RevolutionaryVLMDataset(
+        train_dataset = VLMDataset(
             train_val_split['train'], processor, class_names,
             image_column=image_column, label_column=label_column,
             max_length=config['max_length']
         )
-        val_dataset = RevolutionaryVLMDataset(
+        val_dataset = VLMDataset(
             train_val_split['test'], processor, class_names,
             image_column=image_column, label_column=label_column,
             max_length=config['max_length']
@@ -642,15 +642,15 @@ def main():
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
         num_workers=0, pin_memory=args.device != 'cpu', 
-        collate_fn=lambda batch: revolutionary_vlm_collate_fn(batch, processor)
+        collate_fn=lambda batch: vlm_collate_fn(batch, processor)
     )
     val_dataloader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=0, pin_memory=args.device != 'cpu', 
-        collate_fn=lambda batch: revolutionary_vlm_collate_fn(batch, processor)
+        collate_fn=lambda batch: vlm_collate_fn(batch, processor)
     ) if val_dataset else None
     
-    # Setup optimizer and scheduler - Revolutionary approach
+    # Setup optimizer and scheduler
     # Only optimize unfrozen parameters (last layers + classification head)
     optimizer = AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),  # Only trainable params
@@ -679,7 +679,7 @@ def main():
         )
     
     logger.info(f"Training steps: {total_steps}, Warmup: {warmup_steps}")
-    logger.info(f"🔥 Revolutionary VLM training - frozen base + optimized classification head!")
+    logger.info("VLM training with frozen base model and trainable classification head")
     
     # Training loop
     best_val_accuracy = 0
@@ -695,7 +695,7 @@ def main():
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
         
         for batch in progress_bar:
-            # Revolutionary VLM forward pass
+            # VLM forward pass
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             pixel_values = batch['pixel_values']
@@ -732,17 +732,17 @@ def main():
             
             # Evaluate
             if global_step % args.eval_steps == 0 and val_dataloader:
-                val_metrics = evaluate_revolutionary_vlm(model, val_dataloader, device, class_names)
+                val_metrics = evaluate_vlm_model(model, val_dataloader, device, class_names)
                 
                 if accelerator.is_main_process:
-                    logger.info(f"🚀 Step {global_step} - Val Acc: {val_metrics['accuracy']:.4f}")
+                    logger.info(f"Step {global_step} - Val Acc: {val_metrics['accuracy']:.4f}")
                 
                 if val_metrics['accuracy'] > best_val_accuracy:
                     best_val_accuracy = val_metrics['accuracy']
                     if accelerator.is_main_process:
-                        # Save the revolutionary VLM classifier
-                        torch.save(model.state_dict(), os.path.join(args.output_dir, 'best_revolutionary_vlm.pth'))
-                        logger.info(f"🏆 New best VLM model saved: {best_val_accuracy:.4f}")
+                        # Save the VLM classifier
+                        torch.save(model.state_dict(), os.path.join(args.output_dir, 'best_vlm_model.pth'))
+                        logger.info(f"New best VLM model saved: {best_val_accuracy:.4f}")
                 
                 model.train()
         
@@ -751,14 +751,14 @@ def main():
     
     # Final evaluation
     if val_dataloader:
-        final_metrics = evaluate_revolutionary_vlm(model, val_dataloader, device, class_names)
+        final_metrics = evaluate_vlm_model(model, val_dataloader, device, class_names)
         if accelerator.is_main_process:
-            logger.info("🎯 FINAL REVOLUTIONARY VLM RESULTS:")
+            logger.info("FINAL VLM RESULTS:")
             logger.info(f"  Accuracy: {final_metrics['accuracy']:.4f}")
             logger.info(f"  Macro F1: {final_metrics['macro_f1']:.4f}")
             logger.info(f"  Weighted F1: {final_metrics['weighted_f1']:.4f}")
     
-    logger.info(f"🚀 Revolutionary VLM training completed! Results saved to {args.output_dir}")
+    logger.info(f"VLM training completed! Results saved to {args.output_dir}")
 
 if __name__ == "__main__":
     main() 
