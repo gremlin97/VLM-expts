@@ -170,16 +170,16 @@ class VLMDataset(torch.utils.data.Dataset):
     """
     
     def __init__(self, dataset, processor, class_names: List[str],
-                 image_column: str = 'image', label_column: str = 'label', max_length: int = 1200):
+                 image_column: str = 'image', label_column: str = 'label', max_length: int = 1200,
+                 system_instructions: str = None, prompt_template: str = None):
         self.dataset = dataset
         self.processor = processor
         self.class_names = class_names
         self.image_column = image_column
         self.label_column = label_column
         self.max_length = max_length
-        
-        # Efficient prompt template - concise for speed
-        self.prompt_template = "Classify:"
+        self.system_instructions = system_instructions
+        self.prompt_template = prompt_template or "Classify the Martian surface landform in the following image. Strictly use this format: Reasoning: [step-by-step reasoning] Answer: [Provide only the three-letter abbreviation for the dominant landform type]"
         
     def __len__(self):
         return len(self.dataset)
@@ -196,23 +196,32 @@ class VLMDataset(torch.utils.data.Dataset):
         # Get class name
         class_name = self.class_names[label]
         
-        # Efficient conversation format
-        # Minimal tokens for maximum speed while maintaining VLM structure
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": self.prompt_template}
-                ]
-            },
-            {
-                "role": "assistant", 
-                "content": [
-                    {"type": "text", "text": class_name}
-                ]
-            }
-        ]
+        # Build conversation with system instructions if provided
+        messages = []
+        
+        # Add system instructions if provided
+        if self.system_instructions:
+            messages.append({
+                "role": "system",
+                "content": self.system_instructions
+            })
+        
+        # Add user message with image and prompt
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": self.prompt_template}
+            ]
+        })
+        
+        # Add assistant response with class name
+        messages.append({
+            "role": "assistant", 
+            "content": [
+                {"type": "text", "text": class_name}
+            ]
+        })
         
         # Apply chat template with efficiency
         prompt = self.processor.apply_chat_template(messages, add_generation_prompt=False)
@@ -481,6 +490,12 @@ def main():
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
     parser.add_argument('--warmup_ratio', type=float, default=0.1, help='Warmup ratio')
     
+    # Prompt configuration
+    parser.add_argument('--system_instructions', type=str, default=None,
+                      help='System instructions for the VLM')
+    parser.add_argument('--prompt_template', type=str, default=None,
+                      help='Prompt template for classification')
+    
     # System arguments
     parser.add_argument('--output_dir', type=str, default='./vlm_results', 
                       help='Output directory')
@@ -606,7 +621,9 @@ def main():
     train_dataset = VLMDataset(
         dataset[train_split], processor, class_names,
         image_column=image_column, label_column=label_column,
-        max_length=config['max_length']
+        max_length=config['max_length'],
+        system_instructions=args.system_instructions,
+        prompt_template=args.prompt_template
     )
     
     # Handle validation split
@@ -616,13 +633,17 @@ def main():
         val_dataset = VLMDataset(
             dataset[val_split], processor, class_names,
             image_column=image_column, label_column=label_column,
-            max_length=config['max_length']
+            max_length=config['max_length'],
+            system_instructions=args.system_instructions,
+            prompt_template=args.prompt_template
         )
     elif 'test' in dataset:
         val_dataset = VLMDataset(
             dataset['test'], processor, class_names,
             image_column=image_column, label_column=label_column,
-            max_length=config['max_length']
+            max_length=config['max_length'],
+            system_instructions=args.system_instructions,
+            prompt_template=args.prompt_template
         )
     else:
         # Split training data
@@ -630,12 +651,16 @@ def main():
         train_dataset = VLMDataset(
             train_val_split['train'], processor, class_names,
             image_column=image_column, label_column=label_column,
-            max_length=config['max_length']
+            max_length=config['max_length'],
+            system_instructions=args.system_instructions,
+            prompt_template=args.prompt_template
         )
         val_dataset = VLMDataset(
             train_val_split['test'], processor, class_names,
             image_column=image_column, label_column=label_column,
-            max_length=config['max_length']
+            max_length=config['max_length'],
+            system_instructions=args.system_instructions,
+            prompt_template=args.prompt_template
         )
     
     # Create dataloaders
